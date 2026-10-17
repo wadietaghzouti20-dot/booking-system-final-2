@@ -317,7 +317,7 @@ function hasBookingConflict_(values, date, startMinutes, duration, ignoredRefere
     if (String(row[col["Statut"]]) !== "Confirmé") continue;
     if (normalizeDate_(row[col["Date confirmée"]]) !== date) continue;
 
-    const existingMatch = normalizeTime_(row[col["Heure confirmée"]]).match(/^(\\d{2}):(\\d{2})$/);
+    const existingMatch = normalizeTime_(row[col["Heure confirmée"]]).match(/^(\d{2}):(\d{2})$/);
     if (!existingMatch) continue;
     const existingStart = Number(existingMatch[1]) * 60 + Number(existingMatch[2]);
     const existingService = String(row[col["Motif"]] || "");
