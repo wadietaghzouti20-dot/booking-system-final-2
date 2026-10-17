@@ -32,7 +32,7 @@
     <section class="intro" aria-labelledby="page-title">
       <p class="eyebrow"><span class="eyebrow-dot"></span> RENDEZ-VOUS EN LIGNE</p>
       <h1 id="page-title">Prenons soin de<br><span>vous, simplement.</span></h1>
-      <p class="intro-copy">Quelques étapes suffisent pour envoyer votre demande de rendez-vous. Notre équipe vous recontactera pour la confirmer.</p>
+      <p class="intro-copy">Choisissez un créneau disponible et confirmez votre rendez-vous en quelques étapes simples.</p>
       <div class="trust-row">
         <span><span class="trust-check" aria-hidden="true">✓</span> Simple et rapide</span>
         <span><span class="trust-check" aria-hidden="true">✓</span> Données confidentielles</span>
@@ -42,7 +42,7 @@
     <section class="booking-card" aria-labelledby="form-heading">
       <div class="card-topline">
         <div>
-          <p class="card-kicker">DEMANDE DE RENDEZ-VOUS</p>
+          <p class="card-kicker">RÉSERVATION EN LIGNE</p>
           <h2 id="form-heading">Commençons</h2>
         </div>
         <span class="step-counter" id="step-counter">Étape 1 sur 5</span>
@@ -70,20 +70,19 @@
         <div class="form-step" data-step="2" aria-labelledby="step-title-2" hidden>
           <p class="step-label">02 / DATE ET HORAIRE</p>
           <h3 id="step-title-2">Quand êtes-vous disponible ?</h3>
-          <p class="step-description">Votre choix reste une préférence jusqu’à confirmation par le cabinet.</p>
+          <p class="step-description">Choisissez une date pour afficher les horaires réellement disponibles.</p>
           <div class="field-group">
             <label for="preferred-date">Date souhaitée <span class="required">*</span></label>
             <input id="preferred-date" name="preferredDate" type="date" required>
             <small class="field-hint">Les dates passées ne sont pas acceptées.</small>
           </div>
-          <fieldset class="field-group fieldset-reset">
-            <legend>Moment préféré <span class="required">*</span></legend>
-            <div class="time-grid">
-              <label class="time-option"><input type="radio" name="preferredTime" value="Matin" required><span>☀ Matin</span></label>
-              <label class="time-option"><input type="radio" name="preferredTime" value="Après-midi" required><span>◷ Après-midi</span></label>
-              <label class="time-option"><input type="radio" name="preferredTime" value="Indifférent" required><span>↔ Indifférent</span></label>
-            </div>
-          </fieldset>
+          <div class="field-group">
+            <label for="preferred-time">Heure disponible <span class="required">*</span></label>
+            <select id="preferred-time" name="preferredTime" required disabled>
+              <option value="">Choisissez d’abord une date</option>
+            </select>
+            <small class="field-hint" id="slot-status" aria-live="polite">Choisissez une date pour afficher les heures disponibles.</small>
+          </div>
         </div>
 
         <div class="form-step" data-step="3" aria-labelledby="step-title-3" hidden>
@@ -119,26 +118,26 @@
 
         <div class="form-step" data-step="5" aria-labelledby="step-title-5" hidden>
           <p class="step-label">05 / VÉRIFICATION</p>
-          <h3 id="step-title-5">Vérifiez votre demande</h3>
-          <p class="step-description">Vous pourrez revenir en arrière pour modifier une information.</p>
+          <h3 id="step-title-5">Confirmez votre rendez-vous</h3>
+          <p class="step-description">Vérifiez vos informations et l’heure choisie avant de confirmer.</p>
           <dl class="review-list" id="review-list"></dl>
           <label class="consent-row"><input type="checkbox" id="privacy-consent" name="privacyConsent" required><span>J’accepte que le cabinet utilise ces informations pour traiter ma demande de rendez-vous. <span class="required">*</span></span></label>
-          <p class="disclaimer">L’envoi de cette demande ne confirme pas encore un rendez-vous. Le cabinet vous contactera pour convenir de l’horaire définitif.</p>
+          <p class="disclaimer">Votre créneau sera réservé immédiatement si les informations sont valides et que la disponibilité n’a pas changé.</p>
         </div>
 
         <div class="form-actions" id="form-actions">
           <button class="button button-secondary" id="back-button" type="button" disabled>← Retour</button>
           <button class="button button-primary" id="next-button" type="button">Continuer <span aria-hidden="true">→</span></button>
-          <button class="button button-primary" id="submit-button" type="submit" hidden>Envoyer la demande <span aria-hidden="true">→</span></button>
+          <button class="button button-primary" id="submit-button" type="submit" hidden>Confirmer mon rendez-vous <span aria-hidden="true">→</span></button>
         </div>
-        <p class="secure-footnote"><span aria-hidden="true">⌑</span> Formulaire sécurisé · Demande sans engagement</p>
+        <p class="secure-footnote"><span aria-hidden="true">⌑</span> Réservation en ligne · Confirmation immédiate</p>
       </form>
 
       <section id="success-panel" class="success-panel" aria-labelledby="success-title" hidden>
         <div class="success-symbol" aria-hidden="true">✓</div>
-        <p class="card-kicker">DEMANDE ENVOYÉE</p>
-        <h3 id="success-title">Merci pour votre confiance.</h3>
-        <p id="success-message">Votre demande a été transmise. Le cabinet vous contactera pour confirmer le rendez-vous.</p>
+        <p class="card-kicker">RÉSERVATION CONFIRMÉE</p>
+        <h3 id="success-title">Votre rendez-vous est confirmé.</h3>
+        <p id="success-message">Votre rendez-vous est confirmé. Conservez votre référence de réservation.</p>
         <p class="reference-line" id="request-reference" hidden></p>
         <button class="button button-secondary" id="new-request-button" type="button">Faire une nouvelle demande</button>
       </section>
