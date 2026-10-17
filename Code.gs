@@ -289,6 +289,14 @@ function assertSlotCanBeBooked_(sheet, date, time, service, ignoredReference) {
   if (parts[1] % 15 !== 0) {
     throw new Error("Choisissez un début de rendez-vous sur un quart d'heure.");
   }
+  if (date === today) {
+    const nowParts = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "HH:mm").split(":").map(Number);
+    const currentMinutes = nowParts[0] * 60 + nowParts[1];
+    const earliestStart = Math.ceil((currentMinutes + 15) / 15) * 15;
+    if (start < earliestStart) {
+      throw new Error("Ce créneau n’est plus disponible. Choisissez une heure future.");
+    }
+  }
 
   const schedule = getScheduleForDate_(date);
   if (!schedule.open) throw new Error("Le cabinet est fermé le vendredi.");
