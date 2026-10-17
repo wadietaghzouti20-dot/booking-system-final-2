@@ -216,10 +216,10 @@ function confirmAppointment(reference, confirmedDate, confirmedTime) {
   confirmedDate = cleanText_(confirmedDate, 10);
   confirmedTime = cleanText_(confirmedTime, 5);
 
-  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(confirmedDate) || !isRealDate_(confirmedDate)) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(confirmedDate) || !isRealDate_(confirmedDate)) {
     throw new Error("Date de confirmation invalide (format attendu : AAAA-MM-JJ).");
   }
-  if (!/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(confirmedTime)) {
+  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(confirmedTime)) {
     throw new Error("Heure invalide. Utilisez le format HH:MM.");
   }
 
@@ -282,7 +282,7 @@ function confirmAppointment(reference, confirmedDate, confirmedTime) {
       if (normalizeDate_(row[col["Date confirmée"]]) !== confirmedDate) continue;
 
       const existingStartText = normalizeTime_(row[col["Heure confirmée"]]);
-      const existingMatch = existingStartText.match(/^(\\d{2}):(\\d{2})$/);
+      const existingMatch = existingStartText.match(/^(\d{2}):(\d{2})$/);
       if (!existingMatch) continue;
       const existingStart = Number(existingMatch[1]) * 60 + Number(existingMatch[2]);
       const existingService = String(row[col["Motif"]] || "");
@@ -366,7 +366,7 @@ function isRealDate_(value) {
 function normalizeDate_(value) {
   if (value instanceof Date) return Utilities.formatDate(value, BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
   const text = String(value == null ? "" : value).trim();
-  const match = text.match(/^(\\d{4}-\\d{2}-\\d{2})/);
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})/);
   return match ? match[1] : text;
 }
 
