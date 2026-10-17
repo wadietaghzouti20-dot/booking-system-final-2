@@ -35,14 +35,9 @@
     <p class="status" id="status" aria-live="polite"></p>
     <footer>Si vous avez besoin d’aide, contactez directement le cabinet.</footer>
   </main>
+  <script src="./config.js"></script>
   <script>
-    /*
-     * Safety note:
-     * This page intentionally does not claim to cancel an appointment yet.
-     * Code.gs must first implement and validate a one-time cancellation token,
-     * then the web-app endpoint can be connected here. Never trust a reference
-     * number alone as authorization to cancel a booking.
-     */
+    // The server verifies the one-time token; a booking reference alone is never enough.
     (function () {
       const notice = document.getElementById("notice");
       const button = document.getElementById("cancelButton");
@@ -51,13 +46,39 @@
       const reference = params.get("ref");
       const token = params.get("token");
 
-      if (!reference || !token) {
-        notice.textContent = "Lien incomplet ou invalide. Aucun rendez-vous n’a été modifié. Utilisez le lien reçu par e-mail ou contactez le cabinet.";
+      const endpoint = window.BOOKING_CONFIG && window.BOOKING_CONFIG.appsScriptUrl;
+      if (!reference || !token || !endpoint) {
+        notice.textContent = "Lien incomplet ou service non configuré. Aucun rendez-vous n’a été modifié. Contactez le cabinet si nécessaire.";
+        button.disabled = true;
       } else {
-        notice.textContent = "Lien reçu pour la référence " + reference + ". La validation côté serveur doit être activée avant de pouvoir annuler en toute sécurité.";
+        notice.textContent = "Référence : " + reference + ". Si vous confirmez, le rendez-vous sera annulé et le lien ne pourra plus être réutilisé.";
+        button.disabled = false;
       }
-      button.addEventListener("click", function () {
-        status.textContent = "L’annulation en ligne n’est pas encore disponible. Aucun changement n’a été effectué.";
+      button.addEventListener("click", async function () {
+        if (!reference || !token || !endpoint || button.disabled) return;
+        const accepted = window.confirm("Confirmez-vous l’annulation de ce rendez-vous ? Cette action ne peut pas être annulée ici.");
+        if (!accepted) return;
+        button.disabled = true;
+        button.textContent = "Annulation en cours…";
+        status.textContent = "";
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            redirect: "follow",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify({ action: "cancel", reference: reference, token: token })
+          });
+          if (!response.ok) throw new Error("Le service est temporairement indisponible.");
+          const result = await response.json();
+          if (!result || result.success !== true) throw new Error(result && result.message ? result.message : "L’annulation n’a pas abouti.");
+          notice.textContent = result.message || "Votre rendez-vous a été annulé.";
+          button.textContent = "Rendez-vous annulé";
+          status.textContent = "Vous pouvez fermer cette page.";
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = "Réessayer l’annulation";
+          status.textContent = (error && error.message ? error.message : "Erreur de connexion.") + " Si le problème persiste, contactez le cabinet. Vérifiez le statut dans le tableau avant de réessayer.";
+        }
       });
     })();
   </script>
