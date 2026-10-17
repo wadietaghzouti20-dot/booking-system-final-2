@@ -23,6 +23,12 @@ const BOOKING_SETTINGS = Object.freeze({
     "Autre demande"
   ],
   ALLOWED_TIME_PREFERENCES: ["Matin", "Après-midi", "Indifférent"],
+  SERVICE_DURATIONS_MINUTES: {
+    "Consultation générale": 30,
+    "Contrôle de routine": 20,
+    "Suivi / traitement": 45,
+    "Autre demande": 30
+  },
   MAX_NAME_LENGTH: 100,
   MAX_PHONE_LENGTH: 25,
   MAX_EMAIL_LENGTH: 150,
@@ -200,29 +206,42 @@ function validateRequest_(input) {
 }
 
 /**
- * Clinic staff can use this from the Apps Script editor to confirm a request.
- * Example: confirmAppointment("RDV-AB12CD34", "2026-10-20", "10:00")
- * Only one confirmed appointment may occupy the same date and start time.
- * Appointment length is treated as 60 minutes; choose whole-hour start times.
+ * Confirm a request against the clinic's weekly schedule and service duration.
+ * Hours: Sunday-Thursday 08:00-17:00; Friday closed; Saturday 10:00-16:00.
+ * Starts must be on 15-minute boundaries. Overlapping confirmed appointments
+ * are rejected using each service's configured duration.
  */
 function confirmAppointment(reference, confirmedDate, confirmedTime) {
   reference = cleanText_(reference, 30);
   confirmedDate = cleanText_(confirmedDate, 10);
   confirmedTime = cleanText_(confirmedTime, 5);
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(confirmedDate) || !isRealDate_(confirmedDate)) {
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(confirmedDate) || !isRealDate_(confirmedDate)) {
     throw new Error("Date de confirmation invalide (format attendu : AAAA-MM-JJ).");
   }
-  if (!/^([0-1]\d|2[0-3]):00$/.test(confirmedTime)) {
-    throw new Error("Heure invalide. Utilisez une heure ronde, par exemple 09:00.");
+  if (!/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(confirmedTime)) {
+    throw new Error("Heure invalide. Utilisez le format HH:MM.");
   }
-  const hour = Number(confirmedTime.slice(0, 2));
-  if (hour < 9 || hour > 17) {
-    throw new Error("Les rendez-vous doivent commencer entre 09:00 et 17:00.");
+
+  const parts = confirmedTime.split(":").map(Number);
+  const startMinutes = parts[0] * 60 + parts[1];
+  if (parts[1] % 15 !== 0) {
+    throw new Error("Choisissez un début de rendez-vous sur un quart d'heure (ex. 10:00, 10:15, 10:30).");
   }
+
   const day = new Date(confirmedDate + "T12:00:00");
   const weekday = Number(Utilities.formatDate(day, BOOKING_SETTINGS.TIME_ZONE, "u"));
-  if (weekday === 7) throw new Error("Le cabinet est fermé le dimanche.");
+  let openingMinutes;
+  let closingMinutes;
+  if (weekday === 5) {
+    throw new Error("Le cabinet est fermé le vendredi.");
+  } else if (weekday === 6) {
+    openingMinutes = 10 * 60;
+    closingMinutes = 16 * 60;
+  } else {
+    openingMinutes = 8 * 60;
+    closingMinutes = 17 * 60;
+  }
 
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
@@ -234,30 +253,51 @@ function confirmAppointment(reference, confirmedDate, confirmedTime) {
     headers.forEach(function (name, index) { col[name] = index; });
 
     let targetRow = -1;
+    let targetData = null;
     for (let i = 1; i < values.length; i++) {
       if (String(values[i][col["Référence"]]) === reference) {
         targetRow = i + 1;
+        targetData = values[i];
         break;
       }
     }
     if (targetRow === -1) throw new Error("Référence introuvable.");
+
     const currentStatus = String(sheet.getRange(targetRow, col["Statut"] + 1).getValue());
     if (currentStatus === "Annulée") throw new Error("Cette demande a été annulée.");
+
+    const service = String(targetData[col["Motif"]] || "");
+    const duration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[service] || 30;
+    const endMinutes = startMinutes + duration;
+    if (startMinutes < openingMinutes || endMinutes > closingMinutes) {
+      const opening = minutesToTime_(openingMinutes);
+      const closing = minutesToTime_(closingMinutes);
+      throw new Error("Ce rendez-vous ne respecte pas les horaires du cabinet (" + opening + "–" + closing + ").");
+    }
 
     for (let i = 1; i < values.length; i++) {
       const row = values[i];
       if (String(row[col["Référence"]]) === reference) continue;
       if (String(row[col["Statut"]]) !== "Confirmé") continue;
-      if (String(row[col["Date confirmée"]]) === confirmedDate &&
-          normalizeTime_(row[col["Heure confirmée"]]) === confirmedTime) {
-        throw new Error("Ce créneau est déjà attribué à un autre rendez-vous confirmé.");
+      if (normalizeDate_(row[col["Date confirmée"]]) !== confirmedDate) continue;
+
+      const existingStartText = normalizeTime_(row[col["Heure confirmée"]]);
+      const existingMatch = existingStartText.match(/^(\\d{2}):(\\d{2})$/);
+      if (!existingMatch) continue;
+      const existingStart = Number(existingMatch[1]) * 60 + Number(existingMatch[2]);
+      const existingService = String(row[col["Motif"]] || "");
+      const existingDuration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[existingService] || 30;
+      const existingEnd = existingStart + existingDuration;
+
+      if (startMinutes < existingEnd && existingStart < endMinutes) {
+        throw new Error("Ce créneau chevauche un autre rendez-vous déjà confirmé.");
       }
     }
 
     sheet.getRange(targetRow, col["Date confirmée"] + 1).setNumberFormat("@").setValue(confirmedDate);
     sheet.getRange(targetRow, col["Heure confirmée"] + 1).setNumberFormat("@").setValue(confirmedTime);
     sheet.getRange(targetRow, col["Statut"] + 1).setValue("Confirmé");
-    return "Rendez-vous confirmé : " + reference + " le " + confirmedDate + " à " + confirmedTime + ".";
+    return "Rendez-vous confirmé : " + reference + " le " + confirmedDate + " à " + confirmedTime + " (" + duration + " min).";
   } finally {
     lock.releaseLock();
   }
@@ -321,6 +361,18 @@ function isRealDate_(value) {
   return date.getUTCFullYear() === parts[0] &&
     date.getUTCMonth() === parts[1] - 1 &&
     date.getUTCDate() === parts[2];
+}
+
+function normalizeDate_(value) {
+  if (value instanceof Date) return Utilities.formatDate(value, BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
+  const text = String(value == null ? "" : value).trim();
+  const match = text.match(/^(\\d{4}-\\d{2}-\\d{2})/);
+  return match ? match[1] : text;
+}
+
+function minutesToTime_(minutes) {
+  return String(Math.floor(minutes / 60)).padStart(2, "0") + ":" +
+    String(minutes % 60).padStart(2, "0");
 }
 
 function normalizeTime_(value) {
