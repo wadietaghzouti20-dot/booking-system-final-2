@@ -18,12 +18,16 @@
   const totalSteps = steps.length;
   let currentStep = 1;
   let submitting = false;
+  let availabilityLoading = false;
+  let availabilityRequest = 0;
+  let lastSlotDate = "";
+  let lastSlotService = "";
 
   const config = window.BOOKING_CONFIG || {};
   const labels = {
     service: "Motif du rendez-vous",
     preferredDate: "Date souhaitée",
-    preferredTime: "Moment préféré",
+    preferredTime: "Heure du rendez-vous",
     fullName: "Nom et prénom",
     phone: "Téléphone",
     email: "E-mail",
@@ -38,7 +42,12 @@
   }
 
   const dateInput = document.getElementById("preferred-date");
-  if (dateInput) dateInput.min = localDateString(new Date());
+  const timeSelect = document.getElementById("preferred-time");
+  const slotStatus = document.getElementById("slot-status");
+  if (dateInput) {
+    dateInput.min = localDateString(new Date());
+    dateInput.addEventListener("change", () => loadAvailableSlots());
+  }
 
   function showAlert(message) {
     alertBox.textContent = message;
@@ -70,6 +79,7 @@
     const heading = document.getElementById("step-title-" + currentStep);
     if (heading) heading.setAttribute("tabindex", "-1");
     if (heading) heading.focus({ preventScroll: true });
+    if (currentStep === 2) loadAvailableSlots();
   }
 
   function validateCurrentStep() {
@@ -113,6 +123,15 @@
         dateInput.focus();
         return false;
       }
+      if (availabilityLoading) {
+        showAlert("Veuillez attendre le chargement des créneaux disponibles.");
+        return false;
+      }
+      if (!timeSelect || !timeSelect.value) {
+        showAlert("Veuillez sélectionner une heure disponible avant de continuer.");
+        if (timeSelect) timeSelect.focus();
+        return false;
+      }
     }
     if (currentStep === 3) {
       const phone = document.getElementById("phone");
@@ -127,8 +146,85 @@
   }
 
   function selectedValue(name) {
+    if (name === "preferredTime") return timeSelect ? timeSelect.value : "";
     const selected = form.querySelector('input[name="' + name + '"]:checked');
     return selected ? selected.value : "";
+  }
+
+  async function loadAvailableSlots() {
+    if (!timeSelect || !slotStatus || !dateInput) return;
+    const requestId = ++availabilityRequest;
+    const date = dateInput.value;
+    const service = selectedValue("service");
+    const previousSelection = date === lastSlotDate && service === lastSlotService ? timeSelect.value : "";
+    timeSelect.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+
+    if (!date || !service) {
+      placeholder.textContent = "Choisissez d’abord une date";
+      timeSelect.append(placeholder);
+      timeSelect.disabled = true;
+      slotStatus.textContent = "Choisissez une date pour afficher les heures disponibles.";
+      availabilityLoading = false;
+      return;
+    }
+
+    placeholder.textContent = "Chargement des créneaux…";
+    timeSelect.append(placeholder);
+    timeSelect.disabled = true;
+    slotStatus.textContent = "Recherche des heures disponibles…";
+    availabilityLoading = true;
+
+    try {
+      const endpoint = typeof config.appsScriptUrl === "string" ? config.appsScriptUrl.trim() : "";
+      if (!endpoint || !/^https:\/\/script\.google\.com\/macros\/s\//.test(endpoint)) {
+        throw new Error("La connexion au service de réservation n’est pas configurée.");
+      }
+      const response = await fetch(endpoint, {
+        method: "POST",
+        redirect: "follow",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "availability", preferredDate: date, service: service })
+      });
+      if (!response.ok) throw new Error("Le service de réservation est temporairement indisponible.");
+      const result = await response.json();
+      if (!result || result.success !== true) {
+        throw new Error(result && result.message ? result.message : "Impossible de charger les créneaux.");
+      }
+      if (requestId !== availabilityRequest) return;
+
+      const slots = Array.isArray(result.availableSlots) ? result.availableSlots : [];
+      timeSelect.replaceChildren();
+      const firstOption = document.createElement("option");
+      firstOption.value = "";
+      firstOption.textContent = slots.length ? "Sélectionnez une heure" : "Aucun créneau disponible";
+      timeSelect.append(firstOption);
+      slots.forEach((slot) => {
+        const option = document.createElement("option");
+        option.value = slot;
+        option.textContent = slot;
+        if (slot === previousSelection) option.selected = true;
+        timeSelect.append(option);
+      });
+      timeSelect.disabled = slots.length === 0;
+      lastSlotDate = date;
+      lastSlotService = service;
+      slotStatus.textContent = result.message || (slots.length
+        ? "Ces créneaux sont disponibles au moment de la vérification."
+        : "Aucun créneau disponible. Essayez une autre date.");
+    } catch (error) {
+      if (requestId !== availabilityRequest) return;
+      timeSelect.replaceChildren();
+      const errorOption = document.createElement("option");
+      errorOption.value = "";
+      errorOption.textContent = "Créneaux indisponibles";
+      timeSelect.append(errorOption);
+      timeSelect.disabled = true;
+      slotStatus.textContent = error instanceof Error ? error.message : "Impossible de charger les créneaux.";
+    } finally {
+      if (requestId === availabilityRequest) availabilityLoading = false;
+    }
   }
 
   function getFormData() {
@@ -206,7 +302,7 @@
     backButton.disabled = value || currentStep === 1;
     nextButton.disabled = value;
     submitButton.disabled = value;
-    submitButton.textContent = value ? "Envoi en cours…" : "Envoyer la demande →";
+    submitButton.textContent = value ? "Confirmation en cours…" : "Confirmer mon rendez-vous →";
   }
 
   backButton.addEventListener("click", () => {
@@ -235,10 +331,10 @@
       document.querySelector(".card-topline").hidden = true;
       successPanel.hidden = false;
       document.getElementById("success-message").textContent =
-        result.message || "Votre demande a été transmise. Le cabinet vous contactera pour confirmer le rendez-vous.";
+        result.message || "Votre rendez-vous est confirmé.";
       if (result.reference) {
         const ref = document.getElementById("request-reference");
-        ref.textContent = "Référence de demande : " + String(result.reference);
+        ref.textContent = "Référence de réservation : " + String(result.reference);
         ref.hidden = false;
       }
       successPanel.scrollIntoView({ block: "nearest" });
@@ -258,6 +354,10 @@
     successPanel.hidden = true;
     document.getElementById("request-reference").hidden = true;
     document.getElementById("notes-count").textContent = "0 / 1000";
+    lastSlotDate = "";
+    lastSlotService = "";
+    if (timeSelect) { timeSelect.replaceChildren(); timeSelect.disabled = true; }
+    if (slotStatus) slotStatus.textContent = "Choisissez une date pour afficher les heures disponibles.";
     showStep(1);
   });
 

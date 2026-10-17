@@ -22,7 +22,6 @@ const BOOKING_SETTINGS = Object.freeze({
     "Suivi / traitement",
     "Autre demande"
   ],
-  ALLOWED_TIME_PREFERENCES: ["Matin", "Après-midi", "Indifférent"],
   SERVICE_DURATIONS_MINUTES: {
     "Consultation générale": 30,
     "Contrôle de routine": 20,
@@ -106,6 +105,17 @@ function doPost(e) {
     }
 
     const raw = JSON.parse(e.postData.contents);
+    if (raw && raw.action === "availability") {
+      const availableSlots = getAvailableSlots_(raw.preferredDate, raw.service);
+      return jsonResponse_({
+        success: true,
+        availableSlots: availableSlots,
+        message: availableSlots.length
+          ? "Choisissez un créneau disponible."
+          : "Aucun créneau disponible à cette date. Choisissez une autre date."
+      });
+    }
+
     const data = validateRequest_(raw);
     const lock = LockService.getScriptLock();
     lock.waitLock(15000);
@@ -113,18 +123,19 @@ function doPost(e) {
     let reference;
     try {
       const sheet = getBookingSheet_();
+      assertSlotCanBeBooked_(sheet, data.preferredDate, data.preferredTime, data.service, "");
       reference = "RDV-" + Utilities.getUuid().replace(/-/g, "").slice(0, 8).toUpperCase();
       const now = new Date();
 
       sheet.appendRow([
         reference,
         now,
-        "En attente",
+        "Confirmé",
         data.service,
         data.preferredDate,
         data.preferredTime,
-        "",
-        "",
+        data.preferredDate,
+        data.preferredTime,
         safeCell_(data.fullName),
         safeCell_(data.phone),
         safeCell_(data.email),
@@ -139,7 +150,10 @@ function doPost(e) {
     return jsonResponse_({
       success: true,
       reference: reference,
-      message: "Votre demande a bien été transmise au cabinet. Elle reste en attente de confirmation."
+      status: "Confirmé",
+      confirmedDate: data.preferredDate,
+      confirmedTime: data.preferredTime,
+      message: "Votre rendez-vous est confirmé le " + data.preferredDate + " à " + data.preferredTime + "."
     });
   } catch (error) {
     const message = error && error.message ? error.message : "";
@@ -173,8 +187,8 @@ function validateRequest_(input) {
   if (preferredDate < today) {
     throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
   }
-  if (BOOKING_SETTINGS.ALLOWED_TIME_PREFERENCES.indexOf(preferredTime) === -1) {
-    throw new Error("Veuillez choisir un moment préféré valide.");
+  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(preferredTime)) {
+    throw new Error("Veuillez choisir une heure de rendez-vous valide parmi les créneaux proposés.");
   }
   if (fullName.length < 2) {
     throw new Error("Veuillez saisir votre nom et prénom.");
@@ -203,6 +217,123 @@ function validateRequest_(input) {
     email: email,
     notes: notes
   };
+}
+
+/**
+ * Return exact available start times for a date and service.
+ * All reads use the same script lock as booking writes to avoid inconsistent checks.
+ */
+function getAvailableSlots_(dateValue, serviceValue) {
+  const date = cleanText_(dateValue, 10);
+  const service = cleanText_(serviceValue, 80);
+
+  if (BOOKING_SETTINGS.ALLOWED_SERVICES.indexOf(service) === -1) {
+    throw new Error("Veuillez choisir un motif de rendez-vous valide.");
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isRealDate_(date)) {
+    throw new Error("Veuillez choisir une date valide.");
+  }
+  const today = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
+  if (date < today) {
+    throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
+  }
+
+  const schedule = getScheduleForDate_(date);
+  if (!schedule.open) return [];
+
+  const duration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[service] || 30;
+  let firstStart = schedule.openingMinutes;
+  if (date === today) {
+    const nowText = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "HH:mm").split(":").map(Number);
+    const currentMinutes = nowText[0] * 60 + nowText[1];
+    firstStart = Math.max(firstStart, Math.ceil((currentMinutes + 15) / 15) * 15);
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sheet = getBookingSheet_();
+    const values = sheet.getDataRange().getValues();
+    const slots = [];
+    for (let start = firstStart; start + duration <= schedule.closingMinutes; start += 15) {
+      if (!hasBookingConflict_(values, date, start, duration, "")) {
+        slots.push(minutesToTime_(start));
+      }
+    }
+    return slots;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getScheduleForDate_(date) {
+  const day = new Date(date + "T12:00:00");
+  const weekday = Number(Utilities.formatDate(day, BOOKING_SETTINGS.TIME_ZONE, "u"));
+  if (weekday === 5) return { open: false, openingMinutes: 0, closingMinutes: 0 };
+  if (weekday === 6) return { open: true, openingMinutes: 10 * 60, closingMinutes: 16 * 60 };
+  return { open: true, openingMinutes: 8 * 60, closingMinutes: 17 * 60 };
+}
+
+function assertSlotCanBeBooked_(sheet, date, time, service, ignoredReference) {
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(date) || !isRealDate_(date)) {
+    throw new Error("Date de rendez-vous invalide.");
+  }
+  const today = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
+  if (date < today) throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
+
+  if (!/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(time)) {
+    throw new Error("Veuillez choisir une heure de rendez-vous valide.");
+  }
+  const parts = time.split(":").map(Number);
+  const start = parts[0] * 60 + parts[1];
+  if (parts[1] % 15 !== 0) {
+    throw new Error("Choisissez un début de rendez-vous sur un quart d'heure.");
+  }
+  if (date === today) {
+    const nowParts = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "HH:mm").split(":").map(Number);
+    const currentMinutes = nowParts[0] * 60 + nowParts[1];
+    const earliestStart = Math.ceil((currentMinutes + 15) / 15) * 15;
+    if (start < earliestStart) {
+      throw new Error("Ce créneau n’est plus disponible. Choisissez une heure future.");
+    }
+  }
+
+  const schedule = getScheduleForDate_(date);
+  if (!schedule.open) throw new Error("Le cabinet est fermé le vendredi.");
+  const duration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[service] || 30;
+  const end = start + duration;
+  if (start < schedule.openingMinutes || end > schedule.closingMinutes) {
+    throw new Error("Ce créneau ne respecte pas les horaires du cabinet (" +
+      minutesToTime_(schedule.openingMinutes) + "–" + minutesToTime_(schedule.closingMinutes) + ").");
+  }
+
+  const values = sheet.getDataRange().getValues();
+  if (hasBookingConflict_(values, date, start, duration, ignoredReference)) {
+    throw new Error("Ce créneau vient d'être réservé. Veuillez choisir un autre horaire.");
+  }
+}
+
+function hasBookingConflict_(values, date, startMinutes, duration, ignoredReference) {
+  if (!values || values.length < 2) return false;
+  const headers = values[0];
+  const col = {};
+  headers.forEach(function (name, index) { col[name] = index; });
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (String(row[col["Référence"]]) === ignoredReference) continue;
+    if (String(row[col["Statut"]]) !== "Confirmé") continue;
+    if (normalizeDate_(row[col["Date confirmée"]]) !== date) continue;
+
+    const existingMatch = normalizeTime_(row[col["Heure confirmée"]]).match(/^(\d{2}):(\d{2})$/);
+    if (!existingMatch) continue;
+    const existingStart = Number(existingMatch[1]) * 60 + Number(existingMatch[2]);
+    const existingService = String(row[col["Motif"]] || "");
+    const existingDuration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[existingService] || 30;
+    const existingEnd = existingStart + existingDuration;
+    if (startMinutes < existingEnd && existingStart < startMinutes + duration) return true;
+  }
+  return false;
 }
 
 /**
@@ -317,12 +448,12 @@ function notifyClinic_(reference, data) {
   if (!recipient) return;
   try {
     const body = [
-      "Nouvelle demande de rendez-vous",
+      "Nouveau rendez-vous confirmé automatiquement",
       "",
       "Référence : " + reference,
       "Motif : " + data.service,
-      "Date souhaitée : " + data.preferredDate,
-      "Moment préféré : " + data.preferredTime,
+      "Date confirmée : " + data.preferredDate,
+      "Heure confirmée : " + data.preferredTime,
       "Nom : " + data.fullName,
       "Téléphone : " + data.phone,
       "E-mail : " + (data.email || "Non renseigné"),
@@ -330,7 +461,7 @@ function notifyClinic_(reference, data) {
     ].join("\n");
     MailApp.sendEmail({
       to: recipient,
-      subject: "Nouvelle demande de rendez-vous — " + reference,
+      subject: "Rendez-vous confirmé — " + reference,
       body: body
     });
   } catch (error) {
