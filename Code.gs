@@ -154,7 +154,12 @@ function doPost(e) {
         "",
         ""
       ]);
-      scheduleAppointmentReminder_(reference, cancellationToken, data.email, data.preferredDate, data.preferredTime, data.service, data.fullName);
+      try {
+        scheduleAppointmentReminder_(reference, cancellationToken, data.email, data.preferredDate, data.preferredTime, data.service, data.fullName);
+      } catch (reminderError) {
+        // Keep the confirmed booking successful if Google rejects a reminder trigger.
+        console.error("Could not schedule 24-hour reminder for " + reference + ": " + reminderError);
+      }
     } finally {
       lock.releaseLock();
     }
