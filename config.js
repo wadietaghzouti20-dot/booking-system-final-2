@@ -5,5 +5,5 @@
 window.BOOKING_CONFIG = Object.freeze({
   clinicName: "Cabinet médical",
   clinicPhone: "",
-  appsScriptUrl: ""
+  appsScriptUrl: "https://script.google.com/macros/s/AKfycby5FT_mmaqlHoS48FHlAmH3Sfex4hqnOtR0FyNSRVQapNrvMmOGvXnwZuZnwtV3ld4pyA/exec"
 });
