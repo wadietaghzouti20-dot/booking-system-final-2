@@ -47,7 +47,10 @@ const BOOKING_HEADERS = [
   "Téléphone",
   "E-mail",
   "Message",
-  "Notes internes"
+  "Notes internes",
+  "Jeton annulation",
+  "Rappel envoyé le",
+  "ID déclencheur rappel"
 ];
 
 /**
@@ -76,13 +79,14 @@ function setupBookingSystem() {
   let sheet = spreadsheet.getSheetByName(BOOKING_SETTINGS.SHEET_NAME);
   if (!sheet) sheet = spreadsheet.insertSheet(BOOKING_SETTINGS.SHEET_NAME);
 
-  if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, BOOKING_HEADERS.length).setValues([BOOKING_HEADERS]);
+  ensureBookingColumns_(sheet);
+  if (sheet.getLastRow() === 1) {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, BOOKING_HEADERS.length).setFontWeight("bold");
     sheet.getRange("B:B").setNumberFormat("yyyy-mm-dd hh:mm:ss");
     sheet.getRange("E:E").setNumberFormat("@");
     sheet.getRange("G:G").setNumberFormat("@");
+    sheet.getRange("O:O").setNumberFormat("yyyy-mm-dd hh:mm:ss");
     sheet.autoResizeColumns(1, BOOKING_HEADERS.length);
   }
 
@@ -90,7 +94,7 @@ function setupBookingSystem() {
   return spreadsheet.getUrl();
 }
 
-function doGet() {
+function doGet(e) {
   return jsonResponse_({
     success: true,
     service: "Booking System Final 2",
@@ -105,6 +109,10 @@ function doPost(e) {
     }
 
     const raw = JSON.parse(e.postData.contents);
+    if (raw && raw.action === "cancel") {
+      const cancellation = cancelAppointment_(raw.reference, raw.token);
+      return jsonResponse_({ success: true, message: cancellation });
+    }
     if (raw && raw.action === "availability") {
       const availableSlots = getAvailableSlots_(raw.preferredDate, raw.service);
       return jsonResponse_({
@@ -125,6 +133,7 @@ function doPost(e) {
       const sheet = getBookingSheet_();
       assertSlotCanBeBooked_(sheet, data.preferredDate, data.preferredTime, data.service, "");
       reference = "RDV-" + Utilities.getUuid().replace(/-/g, "").slice(0, 8).toUpperCase();
+      const cancellationToken = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
       const now = new Date();
 
       sheet.appendRow([
@@ -140,8 +149,12 @@ function doPost(e) {
         safeCell_(data.phone),
         safeCell_(data.email),
         safeCell_(data.notes),
+        "",
+        cancellationToken,
+        "",
         ""
       ]);
+      scheduleAppointmentReminder_(reference, cancellationToken, data.email, data.preferredDate, data.preferredTime, data.service, data.fullName);
     } finally {
       lock.releaseLock();
     }
@@ -440,6 +453,7 @@ function getBookingSheet_() {
   const spreadsheet = SpreadsheetApp.openById(id);
   const sheet = spreadsheet.getSheetByName(BOOKING_SETTINGS.SHEET_NAME);
   if (!sheet) throw new Error("L’onglet des demandes est introuvable. Exécutez setupBookingSystem().");
+  ensureBookingColumns_(sheet);
   return sheet;
 }
 
@@ -511,4 +525,164 @@ function normalizeTime_(value) {
   const text = String(value == null ? "" : value).trim();
   const match = text.match(/^([0-2]?\d):([0-5]\d)/);
   return match ? String(match[1]).padStart(2, "0") + ":" + match[2] : text;
+}
+
+
+/**
+ * Add new system columns without deleting or rewriting any existing booking data.
+ */
+function ensureBookingColumns_(sheet) {
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, BOOKING_HEADERS.length).setValues([BOOKING_HEADERS]);
+    return;
+  }
+  const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getDisplayValues()[0];
+  BOOKING_HEADERS.forEach(function (header) {
+    if (existing.indexOf(header) === -1) {
+      const newColumn = sheet.getLastColumn() + 1;
+      sheet.getRange(1, newColumn).setValue(header).setFontWeight("bold");
+      existing.push(header);
+    }
+  });
+}
+
+/**
+ * Create a one-time reminder trigger for exactly 24 hours before the appointment.
+ * Google may execute time-driven triggers a little later than the target time.
+ */
+function scheduleAppointmentReminder_(reference, token, email, date, time, service, fullName) {
+  if (!email) return; // Email is optional in the patient form.
+  const appointmentAt = appointmentDateTime_(date, time);
+  const reminderAt = new Date(appointmentAt.getTime() - 24 * 60 * 60 * 1000);
+  if (reminderAt.getTime() <= Date.now()) return; // Booking made less than 24 hours ahead.
+
+  const trigger = ScriptApp.newTrigger("sendScheduledReminder")
+    .timeBased()
+    .at(reminderAt)
+    .create();
+
+  const sheet = getBookingSheet_();
+  const row = findBookingRow_(sheet, reference);
+  if (row < 2) return;
+  const headers = getHeaderMap_(sheet);
+  sheet.getRange(row, headers["ID déclencheur rappel"]).setValue(trigger.getUniqueId());
+}
+
+/** Trigger entry point. The trigger UID maps to one appointment in the sheet. */
+function sendScheduledReminder(e) {
+  const triggerUid = e && e.triggerUid ? String(e.triggerUid) : "";
+  if (!triggerUid) return;
+  const sheet = getBookingSheet_();
+  const headers = getHeaderMap_(sheet);
+  const values = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (String(row[headers["ID déclencheur rappel"] - 1] || "") !== triggerUid) continue;
+
+    const sheetRow = i + 1;
+    const status = String(row[headers["Statut"] - 1] || "");
+    const reference = String(row[headers["Référence"] - 1] || "");
+    const email = String(row[headers["E-mail"] - 1] || "").trim();
+    const token = String(row[headers["Jeton annulation"] - 1] || "");
+    const date = normalizeDate_(row[headers["Date confirmée"] - 1]);
+    const time = normalizeTime_(row[headers["Heure confirmée"] - 1]);
+    const name = String(row[headers["Nom et prénom"] - 1] || "");
+    const service = String(row[headers["Motif"] - 1] || "");
+
+    if (status === "Confirmé" && email && token && date && time &&
+        !row[headers["Rappel envoyé le"] - 1]) {
+      const cancelUrl = getCancellationUrl_(reference, token);
+      const appointmentLabel = date + " à " + time;
+      MailApp.sendEmail({
+        to: email,
+        subject: "Rappel : votre rendez-vous est demain — " + reference,
+        body: [
+          "Bonjour " + name + ",",
+          "",
+          "Petit rappel : votre rendez-vous est prévu dans 24 heures.",
+          "Date et heure : " + appointmentLabel,
+          "Motif : " + service,
+          "Référence : " + reference,
+          "",
+          "Si vous ne pouvez pas venir, ouvrez ce lien pour demander l'annulation :",
+          cancelUrl,
+          "",
+          "Si vous souhaitez conserver le rendez-vous, aucune action n'est nécessaire.",
+          "",
+          "Cabinet médical"
+        ].join("\\n")
+      });
+      sheet.getRange(sheetRow, headers["Rappel envoyé le"]).setValue(new Date());
+    }
+    sheet.getRange(sheetRow, headers["ID déclencheur rappel"]).clearContent();
+    return;
+  }
+}
+
+/** Patient cancellation requires both the booking reference and the unguessable token. */
+function cancelAppointment_(referenceValue, tokenValue) {
+  const reference = cleanText_(referenceValue, 30);
+  const token = cleanText_(tokenValue, 100);
+  if (!/^RDV-[A-F0-9]{8}$/.test(reference) || !/^[a-f0-9]{64}$/.test(token)) {
+    throw new Error("Lien d’annulation invalide.");
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sheet = getBookingSheet_();
+    const headers = getHeaderMap_(sheet);
+    const row = findBookingRow_(sheet, reference);
+    if (row < 2) throw new Error("Rendez-vous introuvable.");
+    const savedToken = String(sheet.getRange(row, headers["Jeton annulation"]).getValue() || "");
+    if (!savedToken || savedToken !== token) throw new Error("Lien d’annulation invalide ou expiré.");
+    const statusCell = sheet.getRange(row, headers["Statut"]);
+    const status = String(statusCell.getValue() || "");
+    if (status === "Annulée") return "Ce rendez-vous est déjà annulé.";
+    if (status !== "Confirmé") throw new Error("Ce rendez-vous ne peut plus être annulé en ligne.");
+
+    statusCell.setValue("Annulée");
+    sheet.getRange(row, headers["Jeton annulation"]).clearContent(); // one-time use
+    const triggerId = String(sheet.getRange(row, headers["ID déclencheur rappel"]).getValue() || "");
+    if (triggerId) {
+      ScriptApp.getProjectTriggers().forEach(function (trigger) {
+        if (trigger.getUniqueId() === triggerId) ScriptApp.deleteTrigger(trigger);
+      });
+      sheet.getRange(row, headers["ID déclencheur rappel"]).clearContent();
+    }
+    return "Votre rendez-vous a été annulé. Le cabinet en sera informé dans son planning.";
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function appointmentDateTime_(date, time) {
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(date) || !/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(time) || !isRealDate_(date)) {
+    throw new Error("Date ou heure de rendez-vous invalide.");
+  }
+  const parts = time.split(":").map(Number);
+  // Use a fixed offset for Algeria (UTC+1) to avoid server-local timezone differences.
+  return new Date(date + "T" + time + ":00+01:00");
+}
+
+function getCancellationUrl_(reference, token) {
+  return "https://wadietaghzouti20-dot.github.io/booking-system-final-2/cancel.html?ref=" +
+    encodeURIComponent(reference) + "&token=" + encodeURIComponent(token);
+}
+
+function getHeaderMap_(sheet) {
+  const names = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+  const map = {};
+  names.forEach(function (name, index) { if (name) map[name] = index + 1; });
+  return map;
+}
+
+function findBookingRow_(sheet, reference) {
+  const headers = getHeaderMap_(sheet);
+  const refColumn = headers["Référence"];
+  if (!refColumn || sheet.getLastRow() < 2) return -1;
+  const found = sheet.getRange(2, refColumn, sheet.getLastRow() - 1, 1)
+    .createTextFinder(reference).matchEntireCell(true).findNext();
+  return found ? found.getRow() : -1;
 }
