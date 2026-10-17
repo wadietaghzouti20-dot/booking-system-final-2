@@ -20,6 +20,8 @@
   let submitting = false;
   let availabilityLoading = false;
   let availabilityRequest = 0;
+  let lastSlotDate = "";
+  let lastSlotService = "";
 
   const config = window.BOOKING_CONFIG || {};
   const labels = {
@@ -154,6 +156,7 @@
     const requestId = ++availabilityRequest;
     const date = dateInput.value;
     const service = selectedValue("service");
+    const previousSelection = date === lastSlotDate && service === lastSlotService ? timeSelect.value : "";
     timeSelect.replaceChildren();
     const placeholder = document.createElement("option");
     placeholder.value = "";
@@ -201,9 +204,12 @@
         const option = document.createElement("option");
         option.value = slot;
         option.textContent = slot;
+        if (slot === previousSelection) option.selected = true;
         timeSelect.append(option);
       });
       timeSelect.disabled = slots.length === 0;
+      lastSlotDate = date;
+      lastSlotService = service;
       slotStatus.textContent = result.message || (slots.length
         ? "Ces créneaux sont disponibles au moment de la vérification."
         : "Aucun créneau disponible. Essayez une autre date.");
@@ -348,6 +354,8 @@
     successPanel.hidden = true;
     document.getElementById("request-reference").hidden = true;
     document.getElementById("notes-count").textContent = "0 / 1000";
+    lastSlotDate = "";
+    lastSlotService = "";
     if (timeSelect) { timeSelect.replaceChildren(); timeSelect.disabled = true; }
     if (slotStatus) slotStatus.textContent = "Choisissez une date pour afficher les heures disponibles.";
     showStep(1);
