@@ -187,7 +187,8 @@ function validateRequest_(input) {
   if (fullName.length < 2) throw new Error("Veuillez saisir votre nom et prénom.");
   const digits = phone.replace(/\D/g, "");
   if (digits.length < 8 || digits.length > 15) throw new Error("Veuillez saisir un numéro de téléphone valide.");
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Veuillez vérifier votre adresse e-mail.");
+  if (!email) throw new Error("Une adresse e-mail est nécessaire pour envoyer la confirmation et le rappel.");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Veuillez vérifier votre adresse e-mail.");
   if (notes.length > BOOKING_SETTINGS.MAX_NOTES_LENGTH) throw new Error("Le message ne doit pas dépasser 1 000 caractères.");
   if (input.privacyConsent !== true) throw new Error("Veuillez accepter l’utilisation de vos informations pour traiter la demande.");
 
