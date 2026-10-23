@@ -1,6 +1,6 @@
-# Booking System Final 2
+# RENDEVO — Réservation en ligne pour cabinets
 
-Responsive French-language clinic appointment website using GitHub Pages, Google Apps Script, Google Sheets, and Google Calendar.
+RENDEVO is a responsive, French-language appointment-booking system for clinics and professional practices, built with GitHub Pages, Google Apps Script, Google Sheets, and Google Calendar. The clinic name remains configurable so the booking experience can be presented under each customer's practice name.
 
 ## Live website
 
