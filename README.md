@@ -41,7 +41,7 @@ The script first uses `OWNER_EMAIL` in `Code.gs` if configured. If it is blank, 
 - Apps Script and Google Calendar must be authorized by the account that owns the deployment.
 - Google may delay time-driven triggers; a reminder cannot be guaranteed to arrive at the exact second 24 hours before the appointment.
 - Appointments made less than 24 hours ahead cannot receive an advance 24-hour reminder.
-- The patient must provide a valid email for email confirmations, reminders, and calendar invitations.
+- The booking form requires a valid patient email so the confirmation, reminder, and calendar invitation can be sent.
 - Email and calendar operations can fail independently of saving a booking; inspect Apps Script **Executions** if a test message or event is missing.
 - Test with dummy data before using real patient information. Avoid collecting detailed medical records in this basic booking system.
 
