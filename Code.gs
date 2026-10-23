@@ -1,21 +1,24 @@
 /**
- * Booking System Final 2 — Google Apps Script backend
+ * Booking System Final 2 — complete Apps Script backend
  * Time zone: Africa/Algiers
  *
- * SETUP:
- * 1. Run setupBookingSystem() once from the Apps Script editor.
- * 2. Approve Google's requested permissions.
- * 3. Open the execution log and copy the spreadsheet URL.
- * 4. Deploy as a Web app (execute as you; access: anyone).
+ * Setup:
+ * 1) Paste this entire file into Code.gs and save.
+ * 2) Run setupBookingSystem() once and approve permissions.
+ * 3) Deploy > Manage deployments > Edit > New version > Deploy.
  *
- * Do not store medical records or detailed symptoms in this basic booking sheet.
+ * Notifications use the executing Google account. Set OWNER_EMAIL below if
+ * you want clinic notifications sent to a different address.
  */
 
 const BOOKING_SETTINGS = Object.freeze({
   TIME_ZONE: "Africa/Algiers",
   SPREADSHEET_PROPERTY: "BOOKING_SPREADSHEET_ID",
   SHEET_NAME: "Demandes",
-  OWNER_EMAIL: "", // Optional: add the clinic's notification email here.
+  OWNER_EMAIL: "", // Optional: clinic admin notification email.
+  CALENDAR_ID: "primary",
+  WEBSITE_URL: "https://wadietaghzouti20-dot.github.io/booking-system-final-2/",
+  CANCEL_PAGE_URL: "https://wadietaghzouti20-dot.github.io/booking-system-final-2/cancel.html",
   ALLOWED_SERVICES: [
     "Consultation générale",
     "Contrôle de routine",
@@ -35,41 +38,20 @@ const BOOKING_SETTINGS = Object.freeze({
 });
 
 const BOOKING_HEADERS = [
-  "Référence",
-  "Créée le",
-  "Statut",
-  "Motif",
-  "Date souhaitée",
-  "Moment préféré",
-  "Date confirmée",
-  "Heure confirmée",
-  "Nom et prénom",
-  "Téléphone",
-  "E-mail",
-  "Message",
-  "Notes internes",
-  "Jeton annulation",
-  "Rappel envoyé le",
-  "ID déclencheur rappel"
+  "Référence", "Créée le", "Statut", "Motif", "Date souhaitée",
+  "Moment préféré", "Date confirmée", "Heure confirmée", "Nom et prénom",
+  "Téléphone", "E-mail", "Message", "Notes internes", "Jeton annulation",
+  "Rappel envoyé le", "ID déclencheur rappel", "ID événement calendrier"
 ];
 
-/**
- * Run once manually. Creates the spreadsheet and stores its ID in script
- * properties so the web app can find it without exposing the ID to patients.
- */
 function setupBookingSystem() {
   const props = PropertiesService.getScriptProperties();
   let spreadsheetId = props.getProperty(BOOKING_SETTINGS.SPREADSHEET_PROPERTY);
-  let spreadsheet;
+  let spreadsheet = null;
 
   if (spreadsheetId) {
-    try {
-      spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-    } catch (error) {
-      spreadsheet = null;
-    }
+    try { spreadsheet = SpreadsheetApp.openById(spreadsheetId); } catch (err) {}
   }
-
   if (!spreadsheet) {
     spreadsheet = SpreadsheetApp.create("Booking System Final 2 — Demandes de rendez-vous");
     props.setProperty(BOOKING_SETTINGS.SPREADSHEET_PROPERTY, spreadsheet.getId());
@@ -78,23 +60,19 @@ function setupBookingSystem() {
   spreadsheet.setSpreadsheetTimeZone(BOOKING_SETTINGS.TIME_ZONE);
   let sheet = spreadsheet.getSheetByName(BOOKING_SETTINGS.SHEET_NAME);
   if (!sheet) sheet = spreadsheet.insertSheet(BOOKING_SETTINGS.SHEET_NAME);
-
   ensureBookingColumns_(sheet);
-  if (sheet.getLastRow() === 1) {
-    sheet.setFrozenRows(1);
-    sheet.getRange(1, 1, 1, BOOKING_HEADERS.length).setFontWeight("bold");
-    sheet.getRange("B:B").setNumberFormat("yyyy-mm-dd hh:mm:ss");
-    sheet.getRange("E:E").setNumberFormat("@");
-    sheet.getRange("G:G").setNumberFormat("@");
-    sheet.getRange("O:O").setNumberFormat("yyyy-mm-dd hh:mm:ss");
-    sheet.autoResizeColumns(1, BOOKING_HEADERS.length);
-  }
-
-  Logger.log("Spreadsheet created/ready: " + spreadsheet.getUrl());
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, sheet.getLastColumn()).setFontWeight("bold");
+  const headers = getHeaderMap_(sheet);
+  if (headers["Créée le"]) sheet.getRange(2, headers["Créée le"], Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat("yyyy-mm-dd hh:mm:ss");
+  if (headers["Rappel envoyé le"]) sheet.getRange(2, headers["Rappel envoyé le"], Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat("yyyy-mm-dd hh:mm:ss");
+  Logger.log("Spreadsheet ready: " + spreadsheet.getUrl());
+  Logger.log("Admin notification email: " + getOwnerEmail_());
+  Logger.log("Calendar: " + BOOKING_SETTINGS.CALENDAR_ID);
   return spreadsheet.getUrl();
 }
 
-function doGet(e) {
+function doGet() {
   return jsonResponse_({
     success: true,
     service: "Booking System Final 2",
@@ -107,18 +85,17 @@ function doPost(e) {
     if (!e || !e.postData || typeof e.postData.contents !== "string") {
       return jsonResponse_({ success: false, message: "Requête invalide." });
     }
+    const raw = JSON.parse(e.postData.contents || "{}");
 
-    const raw = JSON.parse(e.postData.contents);
-    if (raw && raw.action === "cancel") {
-      const cancellation = cancelAppointment_(raw.reference, raw.token);
-      return jsonResponse_({ success: true, message: cancellation });
+    if (raw.action === "cancel") {
+      return jsonResponse_({ success: true, message: cancelAppointment_(raw.reference, raw.token) });
     }
-    if (raw && raw.action === "availability") {
-      const availableSlots = getAvailableSlots_(raw.preferredDate, raw.service);
+    if (raw.action === "availability") {
+      const slots = getAvailableSlots_(raw.preferredDate, raw.service);
       return jsonResponse_({
         success: true,
-        availableSlots: availableSlots,
-        message: availableSlots.length
+        availableSlots: slots,
+        message: slots.length
           ? "Choisissez un créneau disponible."
           : "Aucun créneau disponible à cette date. Choisissez une autre date."
       });
@@ -128,43 +105,49 @@ function doPost(e) {
     const lock = LockService.getScriptLock();
     lock.waitLock(15000);
 
-    let reference;
+    let reference, token;
     try {
       const sheet = getBookingSheet_();
       assertSlotCanBeBooked_(sheet, data.preferredDate, data.preferredTime, data.service, "");
       reference = "RDV-" + Utilities.getUuid().replace(/-/g, "").slice(0, 8).toUpperCase();
-      const cancellationToken = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
-      const now = new Date();
-
-      sheet.appendRow([
-        reference,
-        now,
-        "Confirmé",
-        data.service,
-        data.preferredDate,
-        data.preferredTime,
-        data.preferredDate,
-        data.preferredTime,
-        safeCell_(data.fullName),
-        safeCell_(data.phone),
-        safeCell_(data.email),
-        safeCell_(data.notes),
-        "",
-        cancellationToken,
-        "",
-        ""
-      ]);
-      try {
-        scheduleAppointmentReminder_(reference, cancellationToken, data.email, data.preferredDate, data.preferredTime, data.service, data.fullName);
-      } catch (reminderError) {
-        // Keep the confirmed booking successful if Google rejects a reminder trigger.
-        console.error("Could not schedule 24-hour reminder for " + reference + ": " + reminderError);
-      }
+      token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, "").toLowerCase();
+      const row = {};
+      row["Référence"] = reference;
+      row["Créée le"] = new Date();
+      row["Statut"] = "Confirmé";
+      row["Motif"] = data.service;
+      row["Date souhaitée"] = data.preferredDate;
+      row["Moment préféré"] = data.preferredTime;
+      row["Date confirmée"] = data.preferredDate;
+      row["Heure confirmée"] = data.preferredTime;
+      row["Nom et prénom"] = safeCell_(data.fullName);
+      row["Téléphone"] = safeCell_(data.phone);
+      row["E-mail"] = data.email;
+      row["Message"] = safeCell_(data.notes);
+      row["Notes internes"] = "";
+      row["Jeton annulation"] = token;
+      row["Rappel envoyé le"] = "";
+      row["ID déclencheur rappel"] = "";
+      row["ID événement calendrier"] = "";
+      appendBookingRow_(sheet, row);
     } finally {
       lock.releaseLock();
     }
 
-    notifyClinic_(reference, data);
+    // These integrations must not undo a successfully saved booking if a
+    // Google service temporarily fails. Each failure is written to execution logs.
+    const calendarId = createCalendarEvent_(reference, token, data);
+    if (calendarId) saveBookingField_(reference, "ID événement calendrier", calendarId);
+
+    try {
+      scheduleAppointmentReminder_(reference, token, data);
+    } catch (err) {
+      console.error("Reminder scheduling failed for " + reference + ": " + err);
+    }
+
+    sendClientConfirmation_(reference, token, data);
+    sendClinicNotification_(reference, data);
+
     return jsonResponse_({
       success: true,
       reference: reference,
@@ -174,10 +157,12 @@ function doPost(e) {
       message: "Votre rendez-vous est confirmé le " + data.preferredDate + " à " + data.preferredTime + "."
     });
   } catch (error) {
-    const message = error && error.message ? error.message : "";
+    console.error("Booking request failed: " + (error && error.stack ? error.stack : error));
     return jsonResponse_({
       success: false,
-      message: message || "Une erreur est survenue. Veuillez vérifier les informations et réessayer."
+      message: error && error.message
+        ? error.message
+        : "Une erreur est survenue. Veuillez vérifier les informations et réessayer."
     });
   }
 }
@@ -186,97 +171,54 @@ function validateRequest_(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Les informations envoyées sont invalides.");
   }
-
   const service = cleanText_(input.service, 80);
   const preferredDate = cleanText_(input.preferredDate, 10);
-  const preferredTime = cleanText_(input.preferredTime, 30);
+  const preferredTime = cleanText_(input.preferredTime, 5);
   const fullName = cleanText_(input.fullName, BOOKING_SETTINGS.MAX_NAME_LENGTH);
   const phone = cleanText_(input.phone, BOOKING_SETTINGS.MAX_PHONE_LENGTH);
   const email = cleanText_(input.email, BOOKING_SETTINGS.MAX_EMAIL_LENGTH);
   const notes = cleanText_(input.notes, BOOKING_SETTINGS.MAX_NOTES_LENGTH);
 
-  if (BOOKING_SETTINGS.ALLOWED_SERVICES.indexOf(service) === -1) {
-    throw new Error("Veuillez choisir un motif de rendez-vous valide.");
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(preferredDate) || !isRealDate_(preferredDate)) {
-    throw new Error("Veuillez choisir une date valide.");
-  }
+  if (BOOKING_SETTINGS.ALLOWED_SERVICES.indexOf(service) === -1) throw new Error("Veuillez choisir un motif de rendez-vous valide.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(preferredDate) || !isRealDate_(preferredDate)) throw new Error("Veuillez choisir une date valide.");
   const today = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
-  if (preferredDate < today) {
-    throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
-  }
-  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(preferredTime)) {
-    throw new Error("Veuillez choisir une heure de rendez-vous valide parmi les créneaux proposés.");
-  }
-  if (fullName.length < 2) {
-    throw new Error("Veuillez saisir votre nom et prénom.");
-  }
+  if (preferredDate < today) throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
+  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(preferredTime)) throw new Error("Veuillez choisir une heure valide parmi les créneaux proposés.");
+  if (fullName.length < 2) throw new Error("Veuillez saisir votre nom et prénom.");
   const digits = phone.replace(/\D/g, "");
-  if (digits.length < 8 || digits.length > 15) {
-    throw new Error("Veuillez saisir un numéro de téléphone valide.");
-  }
-  if (email && (email.length > BOOKING_SETTINGS.MAX_EMAIL_LENGTH ||
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
-    throw new Error("Veuillez vérifier votre adresse e-mail.");
-  }
-  if (notes.length > BOOKING_SETTINGS.MAX_NOTES_LENGTH) {
-    throw new Error("Le message ne doit pas dépasser 1 000 caractères.");
-  }
-  if (input.privacyConsent !== true) {
-    throw new Error("Veuillez accepter l’utilisation de vos informations pour traiter la demande.");
-  }
+  if (digits.length < 8 || digits.length > 15) throw new Error("Veuillez saisir un numéro de téléphone valide.");
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Veuillez vérifier votre adresse e-mail.");
+  if (notes.length > BOOKING_SETTINGS.MAX_NOTES_LENGTH) throw new Error("Le message ne doit pas dépasser 1 000 caractères.");
+  if (input.privacyConsent !== true) throw new Error("Veuillez accepter l’utilisation de vos informations pour traiter la demande.");
 
-  return {
-    service: service,
-    preferredDate: preferredDate,
-    preferredTime: preferredTime,
-    fullName: fullName,
-    phone: phone,
-    email: email,
-    notes: notes
-  };
+  return { service: service, preferredDate: preferredDate, preferredTime: preferredTime,
+    fullName: fullName, phone: phone, email: email, notes: notes };
 }
 
-/**
- * Return exact available start times for a date and service.
- * All reads use the same script lock as booking writes to avoid inconsistent checks.
- */
 function getAvailableSlots_(dateValue, serviceValue) {
   const date = cleanText_(dateValue, 10);
   const service = cleanText_(serviceValue, 80);
-
-  if (BOOKING_SETTINGS.ALLOWED_SERVICES.indexOf(service) === -1) {
-    throw new Error("Veuillez choisir un motif de rendez-vous valide.");
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isRealDate_(date)) {
-    throw new Error("Veuillez choisir une date valide.");
-  }
+  if (BOOKING_SETTINGS.ALLOWED_SERVICES.indexOf(service) === -1) throw new Error("Veuillez choisir un motif de rendez-vous valide.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isRealDate_(date)) throw new Error("Veuillez choisir une date valide.");
   const today = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
-  if (date < today) {
-    throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
-  }
+  if (date < today) throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
 
   const schedule = getScheduleForDate_(date);
   if (!schedule.open) return [];
-
   const duration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[service] || 30;
   let firstStart = schedule.openingMinutes;
   if (date === today) {
-    const nowText = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "HH:mm").split(":").map(Number);
-    const currentMinutes = nowText[0] * 60 + nowText[1];
-    firstStart = Math.max(firstStart, Math.ceil((currentMinutes + 15) / 15) * 15);
+    const nowParts = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "HH:mm").split(":").map(Number);
+    firstStart = Math.max(firstStart, Math.ceil((nowParts[0] * 60 + nowParts[1] + 15) / 15) * 15);
   }
 
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
-    const sheet = getBookingSheet_();
-    const values = sheet.getDataRange().getValues();
+    const values = getBookingSheet_().getDataRange().getValues();
     const slots = [];
     for (let start = firstStart; start + duration <= schedule.closingMinutes; start += 15) {
-      if (!hasBookingConflict_(values, date, start, duration, "")) {
-        slots.push(minutesToTime_(start));
-      }
+      if (!hasBookingConflict_(values, date, start, duration, "")) slots.push(minutesToTime_(start));
     }
     return slots;
   } finally {
@@ -285,171 +227,321 @@ function getAvailableSlots_(dateValue, serviceValue) {
 }
 
 function getScheduleForDate_(date) {
-  const day = new Date(date + "T12:00:00");
+  const day = new Date(date + "T12:00:00Z");
   const weekday = Number(Utilities.formatDate(day, BOOKING_SETTINGS.TIME_ZONE, "u"));
   if (weekday === 5) return { open: false, openingMinutes: 0, closingMinutes: 0 };
-  if (weekday === 6) return { open: true, openingMinutes: 10 * 60, closingMinutes: 16 * 60 };
-  return { open: true, openingMinutes: 8 * 60, closingMinutes: 17 * 60 };
+  if (weekday === 6) return { open: true, openingMinutes: 600, closingMinutes: 960 };
+  return { open: true, openingMinutes: 480, closingMinutes: 1020 };
 }
 
 function assertSlotCanBeBooked_(sheet, date, time, service, ignoredReference) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isRealDate_(date)) {
-    throw new Error("Date de rendez-vous invalide.");
-  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isRealDate_(date)) throw new Error("Date de rendez-vous invalide.");
   const today = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
-  if (date < today) throw new Error("La date choisie est déjà passée. Veuillez en sélectionner une autre.");
-
-  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(time)) {
-    throw new Error("Veuillez choisir une heure de rendez-vous valide.");
-  }
+  if (date < today) throw new Error("La date choisie est déjà passée.");
+  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(time)) throw new Error("Veuillez choisir une heure de rendez-vous valide.");
   const parts = time.split(":").map(Number);
   const start = parts[0] * 60 + parts[1];
-  if (parts[1] % 15 !== 0) {
-    throw new Error("Choisissez un début de rendez-vous sur un quart d'heure.");
-  }
+  if (parts[1] % 15 !== 0) throw new Error("Choisissez un début de rendez-vous sur un quart d'heure.");
   if (date === today) {
-    const nowParts = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "HH:mm").split(":").map(Number);
-    const currentMinutes = nowParts[0] * 60 + nowParts[1];
-    const earliestStart = Math.ceil((currentMinutes + 15) / 15) * 15;
-    if (start < earliestStart) {
-      throw new Error("Ce créneau n’est plus disponible. Choisissez une heure future.");
-    }
+    const now = Utilities.formatDate(new Date(), BOOKING_SETTINGS.TIME_ZONE, "HH:mm").split(":").map(Number);
+    if (start < Math.ceil((now[0] * 60 + now[1] + 15) / 15) * 15) throw new Error("Ce créneau n’est plus disponible. Choisissez une heure future.");
   }
-
   const schedule = getScheduleForDate_(date);
   if (!schedule.open) throw new Error("Le cabinet est fermé le vendredi.");
   const duration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[service] || 30;
-  const end = start + duration;
-  if (start < schedule.openingMinutes || end > schedule.closingMinutes) {
-    throw new Error("Ce créneau ne respecte pas les horaires du cabinet (" +
-      minutesToTime_(schedule.openingMinutes) + "–" + minutesToTime_(schedule.closingMinutes) + ").");
+  if (start < schedule.openingMinutes || start + duration > schedule.closingMinutes) {
+    throw new Error("Ce créneau ne respecte pas les horaires du cabinet (" + minutesToTime_(schedule.openingMinutes) + "–" + minutesToTime_(schedule.closingMinutes) + ").");
   }
-
-  const values = sheet.getDataRange().getValues();
-  if (hasBookingConflict_(values, date, start, duration, ignoredReference)) {
+  if (hasBookingConflict_(sheet.getDataRange().getValues(), date, start, duration, ignoredReference)) {
     throw new Error("Ce créneau vient d'être réservé. Veuillez choisir un autre horaire.");
   }
 }
 
 function hasBookingConflict_(values, date, startMinutes, duration, ignoredReference) {
   if (!values || values.length < 2) return false;
-  const headers = values[0];
   const col = {};
-  headers.forEach(function (name, index) { col[name] = index; });
-
+  values[0].forEach(function (name, index) { col[name] = index; });
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
-    if (String(row[col["Référence"]]) === ignoredReference) continue;
-    if (String(row[col["Statut"]]) !== "Confirmé") continue;
+    if (String(row[col["Référence"]] || "") === ignoredReference) continue;
+    if (String(row[col["Statut"]] || "") !== "Confirmé") continue;
     if (normalizeDate_(row[col["Date confirmée"]]) !== date) continue;
-
-    const existingMatch = normalizeTime_(row[col["Heure confirmée"]]).match(/^(\d{2}):(\d{2})$/);
-    if (!existingMatch) continue;
-    const existingStart = Number(existingMatch[1]) * 60 + Number(existingMatch[2]);
+    const match = normalizeTime_(row[col["Heure confirmée"]]).match(/^(\d{2}):(\d{2})$/);
+    if (!match) continue;
+    const existingStart = Number(match[1]) * 60 + Number(match[2]);
     const existingService = String(row[col["Motif"]] || "");
     const existingDuration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[existingService] || 30;
-    const existingEnd = existingStart + existingDuration;
-    if (startMinutes < existingEnd && existingStart < startMinutes + duration) return true;
+    if (startMinutes < existingStart + existingDuration && existingStart < startMinutes + duration) return true;
   }
   return false;
 }
 
-/**
- * Confirm a request against the clinic's weekly schedule and service duration.
- * Hours: Sunday-Thursday 08:00-17:00; Friday closed; Saturday 10:00-16:00.
- * Starts must be on 15-minute boundaries. Overlapping confirmed appointments
- * are rejected using each service's configured duration.
- */
 function confirmAppointment(reference, confirmedDate, confirmedTime) {
   reference = cleanText_(reference, 30);
   confirmedDate = cleanText_(confirmedDate, 10);
   confirmedTime = cleanText_(confirmedTime, 5);
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(confirmedDate) || !isRealDate_(confirmedDate)) {
-    throw new Error("Date de confirmation invalide (format attendu : AAAA-MM-JJ).");
-  }
-  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(confirmedTime)) {
-    throw new Error("Heure invalide. Utilisez le format HH:MM.");
-  }
-
-  const parts = confirmedTime.split(":").map(Number);
-  const startMinutes = parts[0] * 60 + parts[1];
-  if (parts[1] % 15 !== 0) {
-    throw new Error("Choisissez un début de rendez-vous sur un quart d'heure (ex. 10:00, 10:15, 10:30).");
-  }
-
-  const day = new Date(confirmedDate + "T12:00:00");
-  const weekday = Number(Utilities.formatDate(day, BOOKING_SETTINGS.TIME_ZONE, "u"));
-  let openingMinutes;
-  let closingMinutes;
-  if (weekday === 5) {
-    throw new Error("Le cabinet est fermé le vendredi.");
-  } else if (weekday === 6) {
-    openingMinutes = 10 * 60;
-    closingMinutes = 16 * 60;
-  } else {
-    openingMinutes = 8 * 60;
-    closingMinutes = 17 * 60;
-  }
-
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
     const sheet = getBookingSheet_();
-    const values = sheet.getDataRange().getValues();
-    const headers = values[0];
-    const col = {};
-    headers.forEach(function (name, index) { col[name] = index; });
-
-    let targetRow = -1;
-    let targetData = null;
-    for (let i = 1; i < values.length; i++) {
-      if (String(values[i][col["Référence"]]) === reference) {
-        targetRow = i + 1;
-        targetData = values[i];
-        break;
-      }
-    }
-    if (targetRow === -1) throw new Error("Référence introuvable.");
-
-    const currentStatus = String(sheet.getRange(targetRow, col["Statut"] + 1).getValue());
-    if (currentStatus === "Annulée") throw new Error("Cette demande a été annulée.");
-
-    const service = String(targetData[col["Motif"]] || "");
-    const duration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[service] || 30;
-    const endMinutes = startMinutes + duration;
-    if (startMinutes < openingMinutes || endMinutes > closingMinutes) {
-      const opening = minutesToTime_(openingMinutes);
-      const closing = minutesToTime_(closingMinutes);
-      throw new Error("Ce rendez-vous ne respecte pas les horaires du cabinet (" + opening + "–" + closing + ").");
-    }
-
-    for (let i = 1; i < values.length; i++) {
-      const row = values[i];
-      if (String(row[col["Référence"]]) === reference) continue;
-      if (String(row[col["Statut"]]) !== "Confirmé") continue;
-      if (normalizeDate_(row[col["Date confirmée"]]) !== confirmedDate) continue;
-
-      const existingStartText = normalizeTime_(row[col["Heure confirmée"]]);
-      const existingMatch = existingStartText.match(/^(\d{2}):(\d{2})$/);
-      if (!existingMatch) continue;
-      const existingStart = Number(existingMatch[1]) * 60 + Number(existingMatch[2]);
-      const existingService = String(row[col["Motif"]] || "");
-      const existingDuration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[existingService] || 30;
-      const existingEnd = existingStart + existingDuration;
-
-      if (startMinutes < existingEnd && existingStart < endMinutes) {
-        throw new Error("Ce créneau chevauche un autre rendez-vous déjà confirmé.");
-      }
-    }
-
-    sheet.getRange(targetRow, col["Date confirmée"] + 1).setNumberFormat("@").setValue(confirmedDate);
-    sheet.getRange(targetRow, col["Heure confirmée"] + 1).setNumberFormat("@").setValue(confirmedTime);
-    sheet.getRange(targetRow, col["Statut"] + 1).setValue("Confirmé");
-    return "Rendez-vous confirmé : " + reference + " le " + confirmedDate + " à " + confirmedTime + " (" + duration + " min).";
+    const rowNumber = findBookingRow_(sheet, reference);
+    if (rowNumber < 2) throw new Error("Référence introuvable.");
+    const headers = getHeaderMap_(sheet);
+    const row = sheet.getRange(rowNumber, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const service = String(row[headers["Motif"] - 1] || "");
+    assertSlotCanBeBooked_(sheet, confirmedDate, confirmedTime, service, reference);
+    sheet.getRange(rowNumber, headers["Date confirmée"]).setNumberFormat("@").setValue(confirmedDate);
+    sheet.getRange(rowNumber, headers["Heure confirmée"]).setNumberFormat("@").setValue(confirmedTime);
+    sheet.getRange(rowNumber, headers["Statut"]).setValue("Confirmé");
+    return "Rendez-vous confirmé : " + reference + " le " + confirmedDate + " à " + confirmedTime + ".";
   } finally {
     lock.releaseLock();
   }
+}
+
+function createCalendarEvent_(reference, token, data) {
+  try {
+    const calendar = CalendarApp.getCalendarById(BOOKING_SETTINGS.CALENDAR_ID);
+    if (!calendar) throw new Error("Calendar not accessible: " + BOOKING_SETTINGS.CALENDAR_ID);
+    const start = appointmentDateTime_(data.preferredDate, data.preferredTime);
+    const duration = BOOKING_SETTINGS.SERVICE_DURATIONS_MINUTES[data.service] || 30;
+    const end = new Date(start.getTime() + duration * 60000);
+    const details = [
+      "Statut : Confirmé", "Référence : " + reference, "Motif : " + data.service,
+      "Patient : " + data.fullName, "Téléphone : " + data.phone,
+      "E-mail : " + (data.email || "Non renseigné"), "Message : " + (data.notes || "Aucun"),
+      "Annulation patient : " + getCancellationUrl_(reference, token)
+    ].join("\n");
+    const options = { description: details, sendInvites: Boolean(data.email) };
+    if (data.email) options.guests = data.email;
+    const event = calendar.createEvent("Rendez-vous — " + data.fullName + " (" + data.service + ")", start, end, options);
+    return event.getId();
+  } catch (err) {
+    console.error("Calendar event creation failed for " + reference + ": " + err);
+    return "";
+  }
+}
+
+function sendClientConfirmation_(reference, token, data) {
+  if (!data.email) {
+    console.log("No client email provided; skipped confirmation for " + reference);
+    return;
+  }
+  const cancelUrl = getCancellationUrl_(reference, token);
+  const dateLabel = formatDateFr_(data.preferredDate);
+  const timeLabel = data.preferredTime;
+  const subject = "Rendez-vous confirmé — " + reference;
+  const body = [
+    "Bonjour " + data.fullName + ",", "",
+    "Votre rendez-vous est confirmé.", "",
+    "Motif : " + data.service, "Date : " + dateLabel, "Heure : " + timeLabel,
+    "Référence : " + reference, "",
+    "Pour annuler ce rendez-vous, ouvrez ce lien : " + cancelUrl, "",
+    "Un rappel vous sera envoyé environ 24 heures avant le rendez-vous si celui-ci est prévu dans plus de 24 heures.",
+    "Vous pouvez également recevoir une invitation Google Agenda si votre adresse e-mail a été renseignée.",
+    "", "À bientôt."
+  ].join("\n");
+  const html = "<div style='font-family:Arial,sans-serif;line-height:1.6;color:#202b35;max-width:600px'>" +
+    "<h2 style='color:#176b68'>Votre rendez-vous est confirmé</h2>" +
+    "<p>Bonjour " + escapeHtml_(data.fullName) + ",</p><p>Votre rendez-vous a bien été confirmé.</p>" +
+    "<p><b>Motif :</b> " + escapeHtml_(data.service) + "<br><b>Date :</b> " + escapeHtml_(dateLabel) +
+    "<br><b>Heure :</b> " + escapeHtml_(timeLabel) + "<br><b>Référence :</b> " + escapeHtml_(reference) + "</p>" +
+    "<p>Un rappel vous sera envoyé environ 24 heures avant le rendez-vous, si celui-ci est prévu dans plus de 24 heures.</p>" +
+    "<p><a href='" + escapeHtml_(cancelUrl) + "' style='display:inline-block;padding:12px 18px;background:#b42318;color:#fff;text-decoration:none;border-radius:8px;font-weight:bold'>Annuler mon rendez-vous</a></p>" +
+    "<p>Si le bouton ne fonctionne pas, copiez ce lien :<br><a href='" + escapeHtml_(cancelUrl) + "'>" + escapeHtml_(cancelUrl) + "</a></p>" +
+    "<p>À bientôt.</p></div>";
+  try {
+    MailApp.sendEmail({ to: data.email, subject: subject, body: body, htmlBody: html, name: "Cabinet médical" });
+  } catch (err) {
+    console.error("Client confirmation email failed for " + reference + ": " + err);
+  }
+}
+
+function sendClinicNotification_(reference, data) {
+  const recipient = getOwnerEmail_();
+  if (!recipient) {
+    console.error("Admin email skipped: OWNER_EMAIL is blank and Apps Script could not identify the executing account.");
+    return;
+  }
+  const body = [
+    "NOUVEAU RENDEZ-VOUS CONFIRMÉ", "",
+    "Statut : Confirmé", "Référence : " + reference,
+    "Nom et prénom : " + data.fullName, "Téléphone : " + data.phone,
+    "E-mail : " + (data.email || "Non renseigné"), "Motif : " + data.service,
+    "Date : " + formatDateFr_(data.preferredDate), "Heure : " + data.preferredTime,
+    "Message du patient : " + (data.notes || "Aucun"),
+    "", "Le rendez-vous a été ajouté au Google Agenda principal si Calendar était accessible."
+  ].join("\n");
+  const html = "<div style='font-family:Arial,sans-serif;line-height:1.6;color:#202b35'>" +
+    "<h2>Nouveau rendez-vous confirmé</h2><p><b>Statut :</b> Confirmé<br><b>Référence :</b> " + escapeHtml_(reference) +
+    "<br><b>Patient :</b> " + escapeHtml_(data.fullName) + "<br><b>Téléphone :</b> " + escapeHtml_(data.phone) +
+    "<br><b>E-mail :</b> " + escapeHtml_(data.email || "Non renseigné") + "<br><b>Motif :</b> " + escapeHtml_(data.service) +
+    "<br><b>Date :</b> " + escapeHtml_(formatDateFr_(data.preferredDate)) + "<br><b>Heure :</b> " + escapeHtml_(data.preferredTime) +
+    "</p><h3>Message du patient</h3><p>" + escapeHtml_(data.notes || "Aucun") + "</p></div>";
+  try {
+    MailApp.sendEmail({ to: recipient, subject: "Nouveau rendez-vous confirmé — " + reference, body: body, htmlBody: html, name: "Booking System Final 2" });
+  } catch (err) {
+    console.error("Admin notification failed for " + reference + ": " + err);
+  }
+}
+
+function scheduleAppointmentReminder_(reference, token, data) {
+  if (!data.email) return;
+  const appointmentAt = appointmentDateTime_(data.preferredDate, data.preferredTime);
+  const reminderAt = new Date(appointmentAt.getTime() - 24 * 60 * 60 * 1000);
+  if (reminderAt.getTime() <= Date.now()) {
+    console.log("Skipped 24-hour reminder because booking is less than 24 hours away: " + reference);
+    return;
+  }
+  const trigger = ScriptApp.newTrigger("sendScheduledReminder").timeBased().at(reminderAt).create();
+  const sheet = getBookingSheet_();
+  const row = findBookingRow_(sheet, reference);
+  if (row < 2) {
+    ScriptApp.deleteTrigger(trigger);
+    return;
+  }
+  const headers = getHeaderMap_(sheet);
+  sheet.getRange(row, headers["ID déclencheur rappel"]).setValue(trigger.getUniqueId());
+}
+
+function sendScheduledReminder(e) {
+  const triggerUid = e && e.triggerUid ? String(e.triggerUid) : "";
+  if (!triggerUid) return;
+  const sheet = getBookingSheet_();
+  const headers = getHeaderMap_(sheet);
+  const values = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (String(row[headers["ID déclencheur rappel"] - 1] || "") !== triggerUid) continue;
+    const rowNumber = i + 1;
+    const reference = String(row[headers["Référence"] - 1] || "");
+    const status = String(row[headers["Statut"] - 1] || "");
+    const email = String(row[headers["E-mail"] - 1] || "").trim();
+    const token = String(row[headers["Jeton annulation"] - 1] || "");
+    const date = normalizeDate_(row[headers["Date confirmée"] - 1]);
+    const time = normalizeTime_(row[headers["Heure confirmée"] - 1]);
+    const name = String(row[headers["Nom et prénom"] - 1] || "");
+    const service = String(row[headers["Motif"] - 1] || "");
+    try {
+      if (status === "Confirmé" && email && token && date && time && !row[headers["Rappel envoyé le"] - 1]) {
+        const cancelUrl = getCancellationUrl_(reference, token);
+        const dateLabel = formatDateFr_(date);
+        const body = "Bonjour " + name + ",\n\nRappel : votre rendez-vous est prévu dans environ 24 heures.\n\nMotif : " + service +
+          "\nDate : " + dateLabel + "\nHeure : " + time + "\nRéférence : " + reference +
+          "\n\nPour annuler ce rendez-vous, ouvrez ce lien : " + cancelUrl + "\n\nSi vous souhaitez conserver le rendez-vous, aucune action n'est nécessaire.";
+        const html = "<div style='font-family:Arial,sans-serif;line-height:1.6;color:#202b35'><h2>Rappel de rendez-vous</h2>" +
+          "<p>Bonjour " + escapeHtml_(name) + ", votre rendez-vous est prévu dans environ 24 heures.</p><p><b>Motif :</b> " +
+          escapeHtml_(service) + "<br><b>Date :</b> " + escapeHtml_(dateLabel) + "<br><b>Heure :</b> " + escapeHtml_(time) +
+          "<br><b>Référence :</b> " + escapeHtml_(reference) + "</p><p><a href='" + escapeHtml_(cancelUrl) +
+          "' style='display:inline-block;padding:12px 18px;background:#b42318;color:#fff;text-decoration:none;border-radius:8px;font-weight:bold'>Annuler mon rendez-vous</a></p>" +
+          "<p>Si vous souhaitez conserver le rendez-vous, aucune action n'est nécessaire.</p></div>";
+        MailApp.sendEmail({ to: email, subject: "Rappel : votre rendez-vous est demain — " + reference, body: body, htmlBody: html, name: "Cabinet médical" });
+        sheet.getRange(rowNumber, headers["Rappel envoyé le"]).setValue(new Date());
+      }
+    } catch (err) {
+      console.error("Reminder email failed for " + reference + ": " + err);
+    } finally {
+      sheet.getRange(rowNumber, headers["ID déclencheur rappel"]).clearContent();
+      const trigger = ScriptApp.getProjectTriggers().filter(function (t) { return t.getUniqueId() === triggerUid; })[0];
+      if (trigger) ScriptApp.deleteTrigger(trigger);
+    }
+    return;
+  }
+}
+
+function cancelAppointment_(referenceValue, tokenValue) {
+  const reference = cleanText_(referenceValue, 30);
+  const token = cleanText_(tokenValue, 100);
+  if (!/^RDV-[A-F0-9]{8}$/.test(reference) || !/^[a-f0-9]{64}$/.test(token)) throw new Error("Lien d’annulation invalide.");
+
+  let details;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sheet = getBookingSheet_();
+    const headers = getHeaderMap_(sheet);
+    const rowNumber = findBookingRow_(sheet, reference);
+    if (rowNumber < 2) throw new Error("Rendez-vous introuvable.");
+    const row = sheet.getRange(rowNumber, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const savedToken = String(row[headers["Jeton annulation"] - 1] || "");
+    if (!savedToken || savedToken !== token) throw new Error("Lien d’annulation invalide ou expiré.");
+    const status = String(row[headers["Statut"] - 1] || "");
+    if (status === "Annulée") return "Ce rendez-vous est déjà annulé.";
+    if (status !== "Confirmé") throw new Error("Ce rendez-vous ne peut plus être annulé en ligne.");
+
+    const triggerId = String(row[headers["ID déclencheur rappel"] - 1] || "");
+    const calendarEventId = String(row[headers["ID événement calendrier"] - 1] || "");
+    sheet.getRange(rowNumber, headers["Statut"]).setValue("Annulée");
+    sheet.getRange(rowNumber, headers["Jeton annulation"]).clearContent();
+    sheet.getRange(rowNumber, headers["ID déclencheur rappel"]).clearContent();
+
+    if (triggerId) {
+      ScriptApp.getProjectTriggers().forEach(function (trigger) {
+        if (trigger.getUniqueId() === triggerId) ScriptApp.deleteTrigger(trigger);
+      });
+    }
+
+    details = {
+      reference: reference,
+      name: String(row[headers["Nom et prénom"] - 1] || ""),
+      phone: String(row[headers["Téléphone"] - 1] || ""),
+      email: String(row[headers["E-mail"] - 1] || "").trim(),
+      service: String(row[headers["Motif"] - 1] || ""),
+      date: normalizeDate_(row[headers["Date confirmée"] - 1]),
+      time: normalizeTime_(row[headers["Heure confirmée"] - 1]),
+      notes: String(row[headers["Message"] - 1] || ""),
+      calendarEventId: calendarEventId
+    };
+  } finally {
+    lock.releaseLock();
+  }
+
+  // Status=Annulée immediately frees the slot because availability only counts
+  // rows with status "Confirmé".
+  if (details.calendarEventId) {
+    try {
+      const calendar = CalendarApp.getCalendarById(BOOKING_SETTINGS.CALENDAR_ID);
+      const event = calendar && calendar.getEventById(details.calendarEventId);
+      if (event) event.deleteEvent();
+    } catch (err) {
+      console.error("Could not remove calendar event for " + reference + ": " + err);
+    }
+  }
+  sendCancellationNotices_(details);
+  return "Votre rendez-vous a été annulé. Le créneau est de nouveau disponible et le cabinet a été informé.";
+}
+
+function sendCancellationNotices_(data) {
+  const dateLabel = formatDateFr_(data.date);
+  const body = "Rendez-vous annulé\n\nRéférence : " + data.reference + "\nPatient : " + data.name +
+    "\nMotif : " + data.service + "\nDate : " + dateLabel + "\nHeure : " + data.time;
+  const html = "<div style='font-family:Arial,sans-serif;line-height:1.6'><h2>Rendez-vous annulé</h2><p><b>Référence :</b> " +
+    escapeHtml_(data.reference) + "<br><b>Patient :</b> " + escapeHtml_(data.name) + "<br><b>Motif :</b> " +
+    escapeHtml_(data.service) + "<br><b>Date :</b> " + escapeHtml_(dateLabel) + "<br><b>Heure :</b> " + escapeHtml_(data.time) + "</p></div>";
+  const owner = getOwnerEmail_();
+  if (owner) {
+    try { MailApp.sendEmail({ to: owner, subject: "ANNULATION de rendez-vous — " + data.reference, body: body, htmlBody: html }); }
+    catch (err) { console.error("Admin cancellation email failed: " + err); }
+  }
+  if (data.email) {
+    try {
+      MailApp.sendEmail({
+        to: data.email,
+        subject: "Confirmation d’annulation — " + data.reference,
+        body: "Bonjour " + data.name + ",\n\nVotre rendez-vous a bien été annulé.\n\n" + body + "\n\nLe créneau est libéré. Si vous souhaitez un autre rendez-vous, vous pouvez utiliser : " + BOOKING_SETTINGS.WEBSITE_URL,
+        htmlBody: "<div style='font-family:Arial,sans-serif;line-height:1.6'><h2>Votre rendez-vous a été annulé</h2><p>Bonjour " +
+          escapeHtml_(data.name) + ", votre annulation a bien été enregistrée.</p>" + html +
+          "<p>Le créneau est libéré. Pour réserver un autre rendez-vous, <a href='" + BOOKING_SETTINGS.WEBSITE_URL + "'>ouvrez le site de réservation</a>.</p></div>"
+      });
+    } catch (err) { console.error("Client cancellation email failed: " + err); }
+  }
+}
+
+function getOwnerEmail_() {
+  const configured = String(BOOKING_SETTINGS.OWNER_EMAIL || "").trim();
+  if (configured) return configured;
+  try { return String(Session.getEffectiveUser().getEmail() || "").trim(); } catch (err) { return ""; }
 }
 
 function getBookingSheet_() {
@@ -462,86 +554,29 @@ function getBookingSheet_() {
   return sheet;
 }
 
-function notifyClinic_(reference, data) {
-  const recipient = String(BOOKING_SETTINGS.OWNER_EMAIL || "").trim();
-  if (!recipient) return;
-  try {
-    const body = [
-      "Nouveau rendez-vous confirmé automatiquement",
-      "",
-      "Référence : " + reference,
-      "Motif : " + data.service,
-      "Date confirmée : " + data.preferredDate,
-      "Heure confirmée : " + data.preferredTime,
-      "Nom : " + data.fullName,
-      "Téléphone : " + data.phone,
-      "E-mail : " + (data.email || "Non renseigné"),
-      "Message : " + (data.notes || "Aucun")
-    ].join("\n");
-    MailApp.sendEmail({
-      to: recipient,
-      subject: "Rendez-vous confirmé — " + reference,
-      body: body
-    });
-  } catch (error) {
-    // Email notification is optional; a mail failure must not undo a saved request.
-    console.error("Notification email failed: " + error);
-  }
+function appendBookingRow_(sheet, valuesByHeader) {
+  const headers = getHeaderMap_(sheet);
+  const row = new Array(sheet.getLastColumn()).fill("");
+  Object.keys(valuesByHeader).forEach(function (name) {
+    if (headers[name]) row[headers[name] - 1] = valuesByHeader[name];
+  });
+  sheet.appendRow(row);
 }
 
-function jsonResponse_(payload) {
-  return ContentService.createTextOutput(JSON.stringify(payload))
-    .setMimeType(ContentService.MimeType.JSON);
+function saveBookingField_(reference, fieldName, value) {
+  const sheet = getBookingSheet_();
+  const headers = getHeaderMap_(sheet);
+  const row = findBookingRow_(sheet, reference);
+  if (row >= 2 && headers[fieldName]) sheet.getRange(row, headers[fieldName]).setValue(value);
 }
 
-function cleanText_(value, maxLength) {
-  if (typeof value !== "string" && typeof value !== "number") return "";
-  return String(value).replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, maxLength);
-}
-
-function safeCell_(value) {
-  // Prevent spreadsheet formula injection from user-submitted text.
-  const text = String(value == null ? "" : value);
-  return /^[=+@\-]/.test(text) ? "'" + text : text;
-}
-
-function isRealDate_(value) {
-  const parts = value.split("-").map(Number);
-  const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
-  return date.getUTCFullYear() === parts[0] &&
-    date.getUTCMonth() === parts[1] - 1 &&
-    date.getUTCDate() === parts[2];
-}
-
-function normalizeDate_(value) {
-  if (value instanceof Date) return Utilities.formatDate(value, BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
-  const text = String(value == null ? "" : value).trim();
-  const match = text.match(/^(\d{4}-\d{2}-\d{2})/);
-  return match ? match[1] : text;
-}
-
-function minutesToTime_(minutes) {
-  return String(Math.floor(minutes / 60)).padStart(2, "0") + ":" +
-    String(minutes % 60).padStart(2, "0");
-}
-
-function normalizeTime_(value) {
-  if (value instanceof Date) return Utilities.formatDate(value, BOOKING_SETTINGS.TIME_ZONE, "HH:mm");
-  const text = String(value == null ? "" : value).trim();
-  const match = text.match(/^([0-2]?\d):([0-5]\d)/);
-  return match ? String(match[1]).padStart(2, "0") + ":" + match[2] : text;
-}
-
-
-/**
- * Add new system columns without deleting or rewriting any existing booking data.
- */
 function ensureBookingColumns_(sheet) {
-  if (sheet.getLastRow() === 0) {
+  if (sheet.getLastRow() === 0 || sheet.getLastColumn() === 0) {
     sheet.getRange(1, 1, 1, BOOKING_HEADERS.length).setValues([BOOKING_HEADERS]);
     return;
   }
-  const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getDisplayValues()[0];
+  const lastColumn = Math.max(sheet.getLastColumn(), 1);
+  const existing = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0];
   BOOKING_HEADERS.forEach(function (header) {
     if (existing.indexOf(header) === -1) {
       const newColumn = sheet.getLastColumn() + 1;
@@ -549,131 +584,6 @@ function ensureBookingColumns_(sheet) {
       existing.push(header);
     }
   });
-}
-
-/**
- * Create a one-time reminder trigger for exactly 24 hours before the appointment.
- * Google may execute time-driven triggers a little later than the target time.
- */
-function scheduleAppointmentReminder_(reference, token, email, date, time, service, fullName) {
-  if (!email) return; // Email is optional in the patient form.
-  const appointmentAt = appointmentDateTime_(date, time);
-  const reminderAt = new Date(appointmentAt.getTime() - 24 * 60 * 60 * 1000);
-  if (reminderAt.getTime() <= Date.now()) return; // Booking made less than 24 hours ahead.
-
-  const trigger = ScriptApp.newTrigger("sendScheduledReminder")
-    .timeBased()
-    .at(reminderAt)
-    .create();
-
-  const sheet = getBookingSheet_();
-  const row = findBookingRow_(sheet, reference);
-  if (row < 2) return;
-  const headers = getHeaderMap_(sheet);
-  sheet.getRange(row, headers["ID déclencheur rappel"]).setValue(trigger.getUniqueId());
-}
-
-/** Trigger entry point. The trigger UID maps to one appointment in the sheet. */
-function sendScheduledReminder(e) {
-  const triggerUid = e && e.triggerUid ? String(e.triggerUid) : "";
-  if (!triggerUid) return;
-  const sheet = getBookingSheet_();
-  const headers = getHeaderMap_(sheet);
-  const values = sheet.getDataRange().getValues();
-
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    if (String(row[headers["ID déclencheur rappel"] - 1] || "") !== triggerUid) continue;
-
-    const sheetRow = i + 1;
-    const status = String(row[headers["Statut"] - 1] || "");
-    const reference = String(row[headers["Référence"] - 1] || "");
-    const email = String(row[headers["E-mail"] - 1] || "").trim();
-    const token = String(row[headers["Jeton annulation"] - 1] || "");
-    const date = normalizeDate_(row[headers["Date confirmée"] - 1]);
-    const time = normalizeTime_(row[headers["Heure confirmée"] - 1]);
-    const name = String(row[headers["Nom et prénom"] - 1] || "");
-    const service = String(row[headers["Motif"] - 1] || "");
-
-    if (status === "Confirmé" && email && token && date && time &&
-        !row[headers["Rappel envoyé le"] - 1]) {
-      const cancelUrl = getCancellationUrl_(reference, token);
-      const appointmentLabel = date + " à " + time;
-      MailApp.sendEmail({
-        to: email,
-        subject: "Rappel : votre rendez-vous est demain — " + reference,
-        body: [
-          "Bonjour " + name + ",",
-          "",
-          "Petit rappel : votre rendez-vous est prévu dans 24 heures.",
-          "Date et heure : " + appointmentLabel,
-          "Motif : " + service,
-          "Référence : " + reference,
-          "",
-          "Si vous ne pouvez pas venir, ouvrez ce lien pour demander l'annulation :",
-          cancelUrl,
-          "",
-          "Si vous souhaitez conserver le rendez-vous, aucune action n'est nécessaire.",
-          "",
-          "Cabinet médical"
-        ].join("\\n")
-      });
-      sheet.getRange(sheetRow, headers["Rappel envoyé le"]).setValue(new Date());
-    }
-    sheet.getRange(sheetRow, headers["ID déclencheur rappel"]).clearContent();
-    return;
-  }
-}
-
-/** Patient cancellation requires both the booking reference and the unguessable token. */
-function cancelAppointment_(referenceValue, tokenValue) {
-  const reference = cleanText_(referenceValue, 30);
-  const token = cleanText_(tokenValue, 100);
-  if (!/^RDV-[A-F0-9]{8}$/.test(reference) || !/^[a-f0-9]{64}$/.test(token)) {
-    throw new Error("Lien d’annulation invalide.");
-  }
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
-  try {
-    const sheet = getBookingSheet_();
-    const headers = getHeaderMap_(sheet);
-    const row = findBookingRow_(sheet, reference);
-    if (row < 2) throw new Error("Rendez-vous introuvable.");
-    const savedToken = String(sheet.getRange(row, headers["Jeton annulation"]).getValue() || "");
-    if (!savedToken || savedToken !== token) throw new Error("Lien d’annulation invalide ou expiré.");
-    const statusCell = sheet.getRange(row, headers["Statut"]);
-    const status = String(statusCell.getValue() || "");
-    if (status === "Annulée") return "Ce rendez-vous est déjà annulé.";
-    if (status !== "Confirmé") throw new Error("Ce rendez-vous ne peut plus être annulé en ligne.");
-
-    statusCell.setValue("Annulée");
-    sheet.getRange(row, headers["Jeton annulation"]).clearContent(); // one-time use
-    const triggerId = String(sheet.getRange(row, headers["ID déclencheur rappel"]).getValue() || "");
-    if (triggerId) {
-      ScriptApp.getProjectTriggers().forEach(function (trigger) {
-        if (trigger.getUniqueId() === triggerId) ScriptApp.deleteTrigger(trigger);
-      });
-      sheet.getRange(row, headers["ID déclencheur rappel"]).clearContent();
-    }
-    return "Votre rendez-vous a été annulé. Le cabinet en sera informé dans son planning.";
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function appointmentDateTime_(date, time) {
-  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(date) || !/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(time) || !isRealDate_(date)) {
-    throw new Error("Date ou heure de rendez-vous invalide.");
-  }
-  const parts = time.split(":").map(Number);
-  // Use a fixed offset for Algeria (UTC+1) to avoid server-local timezone differences.
-  return new Date(date + "T" + time + ":00+01:00");
-}
-
-function getCancellationUrl_(reference, token) {
-  return "https://wadietaghzouti20-dot.github.io/booking-system-final-2/cancel.html?ref=" +
-    encodeURIComponent(reference) + "&token=" + encodeURIComponent(token);
 }
 
 function getHeaderMap_(sheet) {
@@ -687,7 +597,67 @@ function findBookingRow_(sheet, reference) {
   const headers = getHeaderMap_(sheet);
   const refColumn = headers["Référence"];
   if (!refColumn || sheet.getLastRow() < 2) return -1;
-  const found = sheet.getRange(2, refColumn, sheet.getLastRow() - 1, 1)
-    .createTextFinder(reference).matchEntireCell(true).findNext();
+  const found = sheet.getRange(2, refColumn, sheet.getLastRow() - 1, 1).createTextFinder(reference).matchEntireCell(true).findNext();
   return found ? found.getRow() : -1;
+}
+
+function appointmentDateTime_(date, time) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(time) || !isRealDate_(date)) {
+    throw new Error("Date ou heure de rendez-vous invalide.");
+  }
+  // Algeria is UTC+1. Explicit offset avoids dependence on server timezone.
+  return new Date(date + "T" + time + ":00+01:00");
+}
+
+function getCancellationUrl_(reference, token) {
+  return BOOKING_SETTINGS.CANCEL_PAGE_URL + "?ref=" + encodeURIComponent(reference) + "&token=" + encodeURIComponent(token);
+}
+
+function isRealDate_(value) {
+  const parts = value.split("-").map(Number);
+  const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  return date.getUTCFullYear() === parts[0] && date.getUTCMonth() === parts[1] - 1 && date.getUTCDate() === parts[2];
+}
+
+function normalizeDate_(value) {
+  if (value instanceof Date) return Utilities.formatDate(value, BOOKING_SETTINGS.TIME_ZONE, "yyyy-MM-dd");
+  const text = String(value == null ? "" : value).trim();
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : text;
+}
+
+function normalizeTime_(value) {
+  if (value instanceof Date) return Utilities.formatDate(value, BOOKING_SETTINGS.TIME_ZONE, "HH:mm");
+  const text = String(value == null ? "" : value).trim();
+  const match = text.match(/^([0-2]?\d):([0-5]\d)/);
+  return match ? String(match[1]).padStart(2, "0") + ":" + match[2] : text;
+}
+
+function minutesToTime_(minutes) {
+  return String(Math.floor(minutes / 60)).padStart(2, "0") + ":" + String(minutes % 60).padStart(2, "0");
+}
+
+function formatDateFr_(date) {
+  const parts = String(date).split("-").map(Number);
+  return Utilities.formatDate(new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], 12, 0, 0)), BOOKING_SETTINGS.TIME_ZONE, "d MMMM yyyy");
+}
+
+function cleanText_(value, maxLength) {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  return String(value).replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, maxLength);
+}
+
+function safeCell_(value) {
+  const text = String(value == null ? "" : value);
+  return /^[=+@\-]/.test(text) ? "'" + text : text;
+}
+
+function escapeHtml_(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function jsonResponse_(payload) {
+  return ContentService.createTextOutput(JSON.stringify(payload)).setMimeType(ContentService.MimeType.JSON);
 }
